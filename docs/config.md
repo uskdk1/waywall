@@ -61,7 +61,7 @@ pause_when = "fullscreen"
 
 [render]
 gpu     = "low-power"
-max_fps = 60
+max_fps = 60                          # 배터리를 아끼려고 모든 모니터를 60fps로 제한 (기본 0 = 주사율)
 tonemap = "agx"
 
 [cursor]
@@ -128,8 +128,10 @@ density = 2.0
 | 키 | 타입 | 내장값 | 설명 |
 |---|---|---|---|
 | `gpu` | string | `"low-power"` | `low-power` · `high-performance` |
-| `max_fps` | int | `60` | shader/scene fps 상한 (`0` = 주사율) |
-| `render_scale` | float | `1.0` | 내부 렌더 해상도 배율 |
+| `max_fps` | int | `0` | shader/scene fps 상한. `0`이면 상한 없이 모니터마다 자기 주사율(120 Hz 모니터는 120fps). 배터리·발열을 줄이려면 `60` 등으로 제한 |
+| `render_scale` | float | `1.0` | 내부 렌더 해상도 배율. 배경의 `render_scale` 옵션과 곱해짐 |
+| `present_mode` | string | `"mailbox"` | Vulkan present 모드: `mailbox` · `fifo` · `immediate`. 지원하지 않으면 `fifo` |
+| `frame_latency` | int | `2` | swapchain이 미리 준비할 수 있는 최대 프레임 수 (작을수록 입력 지연↓) |
 | `tonemap` | string | `"aces"` | `assets/shaders/tonemap/<이름>.wgsl` 선택. 사용자 assets에 파일을 추가하면 새 이름 사용 가능 |
 | `hdr_format` | string | `"rgba16float"` | 씬 내부 HDR 버퍼 포맷 |
 
@@ -186,14 +188,14 @@ density = 2.0
 assets/
 ├─ defaults.toml
 ├─ shaders/
+│  ├─ fullscreen.wgsl       # 화면을 덮는 삼각형 버텍스 셰이더 (셰이더 배경, 후처리 패스)
 │  ├─ fit.wgsl              # 이미지/텍스처 crop·scale
-│  ├─ blit.wgsl             # render_scale 업스케일
 │  ├─ tonemap/{aces,agx,reinhard,none}.wgsl
 │  ├─ bloom/{downsample,upsample}.wgsl
 │  ├─ vignette.wgsl
 │  ├─ lighting.wgsl         # 노멀맵 조명
 │  ├─ particles/{simulate,render}.wgsl
-│  └─ shadertoy/prelude.glsl, prelude.wgsl   # 인터페이스 선언(uniform 블록)만 포함
+│  └─ shadertoy/prelude.glsl, epilogue.glsl, prelude.wgsl   # 인터페이스 선언(uniform 블록)과 main() 래퍼
 └─ sprites/
    └─ soft-circle.wgsl      # 텍스처 없는 파티클의 기본 스프라이트 (절차적 셰이더)
 ```
@@ -224,6 +226,7 @@ interactive = false
 fps = 0
 render_scale = 1.0
 interactive = true
+background = "#000000"     # 첫 프레임이 그려지기 전에 보이는 색
 
 [types.web]
 background = "#000000"     # 페이지가 투명한 부분

@@ -5,7 +5,9 @@ mod config_edit;
 mod cursor;
 mod daemon;
 mod fit;
+mod gpu;
 mod ipc;
+mod properties;
 mod runtime;
 mod wallpaper;
 mod wayland;
@@ -232,7 +234,11 @@ fn row(o: &OutputStatus) -> Vec<String> {
             .map_or(NONE.into(), |k| k.key().into()),
         o.state.to_string(),
         format!("vol {}{}", o.volume, if o.mute { " muted" } else { "" }),
-        o.render_path.map_or(NONE.into(), |r| r.to_string()),
+        match (o.render_path, o.fps) {
+            (Some(r), Some(fps)) => format!("{r} {fps:.1}fps"),
+            (Some(r), None) => r.to_string(),
+            (None, _) => NONE.into(),
+        },
         if reasons.is_empty() {
             String::new()
         } else {

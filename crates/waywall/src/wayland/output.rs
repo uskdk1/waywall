@@ -28,6 +28,7 @@ use waywall_proto::ipc::{RenderPath, WallpaperInfo};
 
 use super::globals::{Globals, NoEvents, PixelBuffer};
 use crate::backend::image::{Decoded, Request};
+use crate::backend::shader::ShaderView;
 use crate::config::OutputConfig;
 use crate::daemon::State;
 use crate::fit::place;
@@ -57,11 +58,11 @@ pub enum Purpose {
     Loading,
 }
 
-#[derive(Debug, Clone)]
 pub enum Content {
     Nothing,
     Color,
     Image(ShownImage),
+    Shader(Box<ShaderView>),
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +177,7 @@ impl Output {
             Content::Nothing => None,
             Content::Color => Some(RenderPath::Solid),
             Content::Image(_) => Some(RenderPath::Shm),
+            Content::Shader(_) => Some(RenderPath::Gpu),
         }
     }
 
@@ -225,6 +227,17 @@ impl Output {
         Ok(())
     }
 
+    /// GPU 서브서피스가 준비된 셰이더로 바꾼다. 첫 프레임 전에는 부모의 `background` 색이 보인다.
+    pub fn present_shader(&mut self, ctx: &Ctx<'_>, view: ShaderView) -> Result<()> {
+        let old_solid = self.set_solid(ctx, view.opts.background)?;
+        let old_plane = self.plane.take();
+        set_input(ctx, self.surface(), view.opts.interactive)?;
+        self.surface().commit();
+        drop((old_solid, old_plane));
+        self.content = Content::Shader(Box::new(view));
+        Ok(())
+    }
+
     /// 출력 크기가 바뀌었을 때 버퍼를 다시 만들지 않고 배치만 갱신한다.
     pub fn relayout(&mut self) {
         let Some((w, h)) = self.logical else { return };
@@ -264,6 +277,8 @@ impl Output {
 
 impl Drop for Output {
     fn drop(&mut self) {
+        // 서브서피스(이미지, GPU)를 부모 layer surface보다 먼저 정리한다.
+        self.content = Content::Nothing;
         self.plane = None;
         self.viewport.destroy();
         if let Some(f) = &self.fractional {
@@ -388,5 +403,38 @@ impl Drop for SolidBuffer {
         if let Self::Pixel(b) = self {
             b.destroy();
         }
+    }
+}
+
+/// 셰이더/씬이 Vulkan으로 그리는 서브서피스. desync라서 present가 부모 커밋 없이 바로 반영된다.
+pub struct GpuPlane {
+    pub surface: WlSurface,
+    subsurface: WlSubsurface,
+    pub viewport: WpViewport,
+}
+
+impl GpuPlane {
+    pub fn new(ctx: &Ctx<'_>, parent: &WlSurface) -> Result<Self> {
+        let (subsurface, surface) = ctx.subcompositor.create_subsurface(parent.clone(), ctx.qh);
+        subsurface.set_desync();
+        let viewport = ctx
+            .globals
+            .viewporter
+            .get_viewport(&surface, ctx.qh, NoEvents);
+        // 입력은 항상 부모(layer surface)가 받는다.
+        set_input(ctx, &surface, false)?;
+        Ok(Self {
+            surface,
+            subsurface,
+            viewport,
+        })
+    }
+}
+
+impl Drop for GpuPlane {
+    fn drop(&mut self) {
+        self.viewport.destroy();
+        self.subsurface.destroy();
+        self.surface.destroy();
     }
 }

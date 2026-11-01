@@ -48,7 +48,15 @@ impl CompositorHandler for State {
     ) {
     }
 
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
+    fn frame(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+        self.on_frame(surface);
+    }
 
     fn surface_enter(
         &mut self,
@@ -188,6 +196,7 @@ impl PointerHandler for State {
         events: &[PointerEvent],
     ) {
         for event in events {
+            self.pointer_event(&event.surface, &event.kind, event.position);
             let PointerEventKind::Enter { .. } = event.kind else {
                 continue;
             };

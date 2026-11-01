@@ -92,11 +92,17 @@ uridecodebin3 ─▶ (vah264dec / vah265dec / vaav1dec …)  video/x-raw(memory:
 ### 셰이더/씬: wgpu
 - `wgpu::Instance`는 Vulkan 백엔드만 활성화, 어댑터는 설정 `render.gpu`(기본 `low-power`)로 선택
 - `Gpu` 하나(Device/Queue)를 모든 출력이 공유, 출력마다 `wgpu::Surface` (raw-window-handle의 Wayland 핸들)
-- **frame 콜백으로 직접 페이싱:** frame 콜백을 받은 뒤에만 그리고 present함
-  (가려진 surface에서 Vulkan FIFO present가 막히는 문제도 이렇게 피함)
-- fps 제한: 마지막 프레임 이후 `1/fps`가 지나지 않았으면 다음 콜백까지 건너뜀
-- 분수 스케일: `wp_fractional_scale_v1`의 값으로 물리 픽셀 크기의 swapchain을 만들고 viewporter destination을 논리 크기로 설정
-- `render_scale < 1`이면 더 작은 오프스크린에 그리고 업스케일
+- `Gpu`는 shader/scene 배경이 처음 필요할 때 만들고(어댑터 선택에 블로킹 수십~수백 ms), GPU를 쓰는 출력이 하나도 없으면 해제
+- GPU 내용은 layer surface 위에 놓인 **GPU 전용 서브서피스**(desync)에 그림. Vulkan present가 그 서브서피스를 직접 커밋하므로
+  부모를 매 프레임 커밋할 필요가 없음. 부모에는 `background` 색의 단색 버퍼(첫 프레임 전에 보임)
+- **frame 콜백으로 직접 페이싱:** present 직전에 `wl_surface.frame`을 요청해 두고(present의 커밋에 함께 실림),
+  콜백을 받은 뒤에만 다음 프레임을 그림. 가려져서 콜백이 안 오면 렌더 루프가 저절로 멈춤
+- present 모드는 `render.present_mode`(기본 `mailbox`, 지원하지 않으면 `fifo`). 우리가 콜백으로 페이싱하므로
+  드라이버의 FIFO 대기에 막히지 않음
+- fps 제한: 콜백이 왔는데 마지막 프레임 이후 `1/fps`가 안 지났으면 calloop 타이머로 남은 시간만큼 기다렸다 그림
+- 분수 스케일·`render_scale`: swapchain을 `물리 픽셀 × render_scale` 크기로 만들고 viewporter destination을 논리 크기로 설정.
+  확대는 컴포지터가 하므로 업스케일 패스가 필요 없음
+- 셰이더 컴파일(naga 파싱·검증, 파이프라인 생성)은 메인 스레드에서 동기적으로 함. 오류는 `set` 응답과 `list`에 표시
 
 씬 렌더러 세부는 [wallpaper-format.md](wallpaper-format.md#씬-배경).
 
@@ -114,7 +120,7 @@ crates/waywall/src/
 ├─ fit.rs             # fit 모드 → viewporter source/destination, downscale 크기
 ├─ gpu/
 │  ├─ mod.rs          # Gpu 지연 생성, Surface 구성
-│  └─ shadertoy.rs    # GLSL 프리앰블 래핑 → naga → SPIR-V
+│  └─ shadertoy.rs    # 프리앰블/에필로그 래핑 → naga 파싱·검증, uniform 레이아웃
 ├─ backend/
 │  ├─ mod.rs          # trait Backend
 │  ├─ image.rs

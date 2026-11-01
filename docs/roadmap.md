@@ -31,12 +31,20 @@ GIF는 아직 첫 프레임만 표시(애니메이션은 M4의 영상 경로에�
 (RSS 19 MB 중 약 6.6 MB는 출력 2개의 이미지 shm 버퍼). 단위 테스트 22개.
 `volume`은 값만 기록하고, 실제 오디오는 M4부터 반영됩니다.
 
-## M3 — GPU 기반 + 셰이더 + 입력
+## M3 — GPU 기반 + 셰이더 + 입력 ✅
 - wgpu(Vulkan) 지연 초기화, 출력별 Surface, frame 콜백 페이싱, fps 제한, `render_scale`
 - Shadertoy GLSL 프리앰블 → naga, WGSL, uniform(`iMouse`, `iPointer`, `iClick`, `u_*`)
 - `interactive = false` 빈 입력 영역, 컴파일 오류를 `list`에 표시
 
 **완료 기준:** 예제 셰이더가 커서 호버/클릭에 반응, `fps = 30` 동작, HiDPI 출력에서 선명.
+
+**결과 (2026-11-01, niri, Intel Iris Xe / Mesa):** wgpu 30(Vulkan) + naga 30. GLSL·WGSL 예제가 화면에 표시되고,
+`set` 후 GPU 초기화 포함 108 ms에 응답. 60fps 정확(5초 299–300프레임, CPU 약 4%), `fps = 30` + `render_scale = 0.5`에서
+5초 150프레임·960×540 렌더. `pause` 시 프레임 0·모든 스레드 깨어남 0, `resume`으로 재개. 셰이더 → 이미지로 바꾸면 GPU 해제
+(스레드 1개로 복귀). 컴파일 오류는 `bad.glsl:3:10: Unknown variable: …`처럼 사용자 파일 줄 번호로 `set`이 거절(이전 배경 유지).
+swapchain은 Bgra8Unorm(Shadertoy와 같은 색). 단위 테스트 30개.
+커서 호버·클릭 반응은 사용자가 직접 확인. `render.max_fps` 기본값을 0(모니터 주사율)으로 바꾼 뒤 240 Hz HDMI 출력에서 약 218fps(CPU 약 12%, 내장 GPU 거의 최대 클럭), `waywall list`에 실측 fps 표시.
+**미확인:** HiDPI(분수 스케일) 출력에서의 선명도 — 이 환경의 두 출력은 모두 스케일 1.
 
 ## M4 — 동영상 (zero-copy)
 - GStreamer 파이프라인, VA-API 디코딩 → dmabuf → `zwp_linux_dmabuf_v1` → 서브서피스

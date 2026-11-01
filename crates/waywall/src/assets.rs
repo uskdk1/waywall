@@ -20,12 +20,10 @@ pub fn defaults_toml() -> &'static str {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // M3(셰이더)부터 사용
 pub struct Assets {
     user_dir: PathBuf,
 }
 
-#[allow(dead_code)]
 impl Assets {
     pub fn new(user_dir: PathBuf) -> Self {
         Self { user_dir }

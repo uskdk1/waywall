@@ -73,7 +73,7 @@ waywall quit
 
 ```
 DP-1      2560x1440@1     rain.mp4  video  playing  vol 30        dmabuf
-eDP-1     1920x1200@1.25  forest    scene  paused   vol 50 muted  gpu    (hidden:frame, user:cli)
+eDP-1     1920x1200@1.25  forest    scene  playing  vol 50 muted  gpu 119.8fps
 HDMI-A-1  1920x1080@1     -         -      idle     vol 50        solid
 ```
 
@@ -118,6 +118,7 @@ HDMI-A-1  1920x1080@1     -         -      idle     vol 50        solid
       "width": 2560, "height": 1440, "scale": 1.0,
       "wallpaper": { "path": "~/Wallpapers/rain.mp4", "kind": "video", "name": "rain.mp4" },
       "render_path": "dmabuf",
+      "fps": 0.0,
       "volume": 30, "mute": false,
       "state": "paused",
       "pause_reasons": [ { "reason": "covered", "source": "foreign_toplevel" } ]
@@ -129,6 +130,8 @@ HDMI-A-1  1920x1080@1     -         -      idle     vol 50        solid
 - `state`: `playing` | `paused` | `loading` | `idle`(배경 없음) | `error`
 - `reason`: `user` | `hidden` | `covered`
 - `source`: `cli` | `frame` | `foreign_toplevel` | `niri`
+- `fps`: 직전 `list` 이후(첫 `list`면 배경이 뜬 이후) 실제로 그린 평균 프레임 수/초. 셰이더·씬·영상처럼 프레임을 계속 내는 배경만 값이 있고, 나머지는 `null`.
+  가려지거나 멈춰서 그리지 않으면 0에 가까워짐. 주사율·fps 제한 확인용
 - `render_path`: `solid`(단색) | `shm` | `dmabuf` | `shm-fallback` | `gpu` | `web` — 성능 문제 진단용.
   아직 아무것도 표시하지 않았으면 `null`
 - `wallpaper`: 설정된 배경(로딩 중·실패 포함). 없으면 `null`. `width`/`height`는 물리 픽셀

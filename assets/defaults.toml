@@ -17,8 +17,10 @@ namespace = "waywall"        # 컴포지터 규칙에서 식별용 layer-shell �
 
 [render]
 gpu          = "low-power"   # low-power | high-performance
-max_fps      = 60            # shader/scene fps 상한 (0 = 주사율)
-render_scale = 1.0
+max_fps      = 0             # shader/scene fps 상한. 0 = 상한 없음(모니터마다 자기 주사율)
+render_scale = 1.0           # 배경의 render_scale 옵션과 곱해짐
+present_mode = "mailbox"     # mailbox | fifo | immediate (지원 안 되면 fifo)
+frame_latency = 2
 tonemap      = "aces"        # assets/shaders/tonemap/<이름>.wgsl
 hdr_format   = "rgba16float"
 
@@ -66,9 +68,10 @@ speed       = 1.0
 hwdec       = true
 
 [types.shader]
-fps          = 0
+fps          = 0             # 0 = frame 콜백마다 (render.max_fps가 상한)
 render_scale = 1.0
 interactive  = true
+background   = "#000000"     # 첫 프레임 전에 보이는 색
 
 [types.scene]
 fps          = 0

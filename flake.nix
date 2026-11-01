@@ -38,7 +38,11 @@
           makeWrapper
         ];
         buildInputs = with pkgs; [ wayland ];
-        runtimeLibs = with pkgs; [ wayland ];
+        # wgpu가 dlopen하는 Vulkan 로더. GPU 드라이버(ICD)는 시스템 것 (docs/development.md)
+        runtimeLibs = with pkgs; [
+          wayland
+          vulkan-loader
+        ];
 
         src = lib.fileset.toSource {
           root = ./.;
@@ -47,6 +51,7 @@
             ./Cargo.lock
             ./crates
             ./assets
+            ./examples # 예제 셰이더 컴파일 테스트
           ];
         };
 
@@ -109,8 +114,12 @@
           ++ (with pkgs; [
             wayland-utils
             cargo-edit
+            vulkan-tools
+            vulkan-validation-layers
           ]);
           LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
+          # 디버그 빌드의 wgpu가 검증 레이어를 찾도록
+          VK_LAYER_PATH = "${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d";
         };
 
         formatter = pkgs.nixfmt;

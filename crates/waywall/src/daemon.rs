@@ -1,21 +1,25 @@
 //! 데몬: 이벤트 루프, 출력별 내용 결정, IPC 요청 처리.
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::io::Read;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
+use std::ptr::NonNull;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use calloop::channel::{Channel, Event as ChannelEvent, Sender, channel};
 use calloop::generic::Generic;
 use calloop::signals::{Signal, Signals};
+use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction};
 use calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::registry::RegistryState;
 use smithay_client_toolkit::seat::SeatState;
-use smithay_client_toolkit::seat::pointer::ThemedPointer;
+use smithay_client_toolkit::seat::pointer::{PointerEventKind, ThemedPointer};
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell};
 use smithay_client_toolkit::shm::Shm;
@@ -25,21 +29,26 @@ use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, QueueHandle};
-use waywall_proto::config::{Config, Fill, FillOrPrevious, ImageOptions, LayerKind};
+use waywall_proto::config::{Config, Fill, FillOrPrevious, ImageOptions, LayerKind, ShaderOptions};
 use waywall_proto::ipc::{
     ListData, OutputStatus, PauseReason, PlayState, Reason, ReasonSource, Request, Response,
     WallpaperInfo,
 };
 use waywall_proto::project::WallpaperKind;
 
+use crate::assets::Assets;
 use crate::backend::image::{self, Decoded};
-use crate::config::{Layers, OutputConfig};
+use crate::backend::shader::{Geometry, ShaderSpec, ShaderView};
+use crate::config::{Layers, OutputConfig, expand_path};
 use crate::config_edit::{self, Target};
+use crate::gpu::Gpu;
+use crate::gpu::shadertoy::{self, Language};
 use crate::ipc::{self, Clients};
+use crate::properties;
 use crate::runtime::{self, Runtime};
 use crate::wallpaper::{self, Source, Wallpaper};
 use crate::wayland::globals::Globals;
-use crate::wayland::output::{Content, Ctx, Output, Pending, Purpose, SCALE_DENOMINATOR};
+use crate::wayland::output::{Content, Ctx, GpuPlane, Output, Pending, Purpose, SCALE_DENOMINATOR};
 
 pub struct State {
     pub qh: QueueHandle<State>,
@@ -68,6 +77,12 @@ pub struct State {
     next_waiter: u64,
     /// 모든 출력이 끝나서 응답할 차례인 waiter. 디스패치가 끝날 때마다 비운다.
     finished: Vec<u64>,
+
+    conn: Connection,
+    handle: LoopHandle<'static, State>,
+    /// shader/scene이 있을 때만 존재한다.
+    gpu: Option<Gpu>,
+    next_view: u64,
 }
 
 /// 디코딩 스레드 → 메인 루프.
@@ -99,6 +114,18 @@ enum Prepared {
         path: PathBuf,
         opts: ImageOptions,
     },
+    Shader {
+        wallpaper: Wallpaper,
+        spec: Box<ShaderSpec>,
+    },
+}
+
+impl Prepared {
+    fn wallpaper(&self) -> &Wallpaper {
+        match self {
+            Prepared::Image { wallpaper, .. } | Prepared::Shader { wallpaper, .. } => wallpaper,
+        }
+    }
 }
 
 pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
@@ -162,10 +189,14 @@ pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
         waiters: HashMap::new(),
         next_waiter: 0,
         finished: Vec::new(),
+        conn,
+        handle,
+        gpu: None,
+        next_view: 0,
     };
 
     tracing::info!(config = ?state.layers.config_path(), "waywall daemon started");
-    event_loop.run(None, &mut state, State::flush_waiters)?;
+    event_loop.run(None, &mut state, State::after_dispatch)?;
     Ok(())
 }
 
@@ -350,6 +381,10 @@ impl State {
     /// 크기/스케일 변경: 배치를 즉시 갱신하고, 미리 줄인 이미지가 이제 부족하면 다시 읽는다.
     fn geometry_changed(&mut self, idx: usize) {
         self.outputs[idx].relayout();
+        if matches!(self.outputs[idx].content, Content::Shader(_)) {
+            self.shader_resized(idx);
+            return;
+        }
         let out = &self.outputs[idx];
         let Content::Image(img) = &out.content else {
             return;
@@ -429,6 +464,30 @@ impl State {
                     opts,
                 })
             }
+            (WallpaperKind::Shader, Source::File(path)) => {
+                let opts: ShaderOptions =
+                    self.layers
+                        .type_options(wp.kind, wp.options.as_ref(), cfg)?;
+                let props = properties::resolve(wp.properties.as_ref(), &cfg.properties)?;
+                let source = std::fs::read_to_string(path)
+                    .with_context(|| format!("failed to read {}", path.display()))?;
+                let compiled = shadertoy::compile(
+                    &self.assets(),
+                    Language::from_path(path),
+                    &source,
+                    &props,
+                    &wp.name,
+                )?;
+                Ok(Prepared::Shader {
+                    spec: Box::new(ShaderSpec {
+                        compiled,
+                        props,
+                        opts,
+                        name: wp.name.clone(),
+                    }),
+                    wallpaper: wp,
+                })
+            }
             (kind, _) => Err(anyhow!("{} wallpapers are not implemented yet", kind.key())),
         }
     }
@@ -446,13 +505,14 @@ impl State {
                 },
             });
         }
-        let Prepared::Image {
-            wallpaper: wp,
-            path,
-            opts,
-        } = self.prepare(&self.outputs[idx].cfg, spec)?;
+        let prepared = self.prepare(&self.outputs[idx].cfg, spec)?;
+        let wp = prepared.wallpaper();
+        tracing::info!(output = %self.outputs[idx].name, wallpaper = %wp.name, kind = ?wp.kind, ?purpose, "loading");
+        let (path, opts) = match prepared {
+            Prepared::Image { path, opts, .. } => (path, opts),
+            Prepared::Shader { spec, .. } => return self.show_shader(idx, *spec, purpose),
+        };
         let out = &self.outputs[idx];
-        tracing::info!(output = %out.name, wallpaper = %wp.name, kind = ?wp.kind, ?purpose, "loading");
         let request = image::Request {
             path,
             target: out.physical().context("output not configured yet")?,
@@ -716,8 +776,181 @@ impl State {
             let out = &mut self.outputs[idx];
             out.user_paused = paused;
             tracing::info!(output = %out.name, paused, "user pause");
+            if let Content::Shader(view) = &mut out.content {
+                view.set_paused(paused);
+                // 멈춰 있던 렌더 루프는 한 장 그려서 다시 돌린다.
+                if !paused && !view.waiting_frame && !view.timer_armed {
+                    self.draw_shader(idx);
+                }
+            }
         }
         Ok(Response::ok())
+    }
+
+    // ── 셰이더 ────────────────────────────────────────────────────────────
+
+    fn assets(&self) -> Assets {
+        Assets::new(expand_path(
+            &self.config.assets.dir,
+            &self.layers.base_dir(),
+        ))
+    }
+
+    fn show_shader(&mut self, idx: usize, spec: ShaderSpec, purpose: Purpose) -> Result<()> {
+        let out = &self.outputs[idx];
+        let geometry = Geometry {
+            logical: out.logical.context("output not configured yet")?,
+            physical: out.physical().context("output not configured yet")?,
+        };
+        let plane = GpuPlane::new(&ctx!(self), out.surface())?;
+        let surface = match &self.gpu {
+            Some(gpu) => gpu.create_surface(&plane.surface)?,
+            None => {
+                let display = NonNull::new(self.conn.backend().display_ptr().cast::<c_void>())
+                    .context("no wl_display pointer (wayland-backend without client_system?)")?;
+                let (gpu, surface) =
+                    Gpu::new(&self.config.render, &self.assets(), display, &plane.surface)?;
+                self.gpu = Some(gpu);
+                surface
+            }
+        };
+        let gpu = self.gpu.as_ref().context("GPU disappeared")?;
+        let id = self.next_view;
+        self.next_view += 1;
+        let paused = self.outputs[idx].user_paused;
+        let view = ShaderView::new(
+            gpu,
+            surface,
+            plane,
+            spec,
+            &self.config.render,
+            geometry,
+            id,
+            paused,
+        )?;
+        let ctx = ctx!(self);
+        let out = &mut self.outputs[idx];
+        if purpose != Purpose::Loading {
+            out.next_generation();
+            out.pending = None;
+            out.loading = None;
+        }
+        out.present_shader(&ctx, view)?;
+        // 멈춘 상태여도 첫 장은 그린다(시간 0에 고정된 화면).
+        self.draw_shader(idx);
+        if purpose == Purpose::Main {
+            self.settle(idx, Ok(()));
+        }
+        Ok(())
+    }
+
+    fn draw_shader(&mut self, idx: usize) {
+        let Some(gpu) = &self.gpu else { return };
+        let out = &mut self.outputs[idx];
+        let Content::Shader(view) = &mut out.content else {
+            return;
+        };
+        if let Err(e) = view.draw(gpu, &self.qh) {
+            tracing::error!(output = %out.name, "{e:#}");
+            out.error = Some(format!("{e:#}"));
+        }
+    }
+
+    fn shader_resized(&mut self, idx: usize) {
+        let Some(gpu) = &self.gpu else { return };
+        let out = &mut self.outputs[idx];
+        let (Some(logical), Some(physical)) = (out.logical, out.physical()) else {
+            return;
+        };
+        let Content::Shader(view) = &mut out.content else {
+            return;
+        };
+        if let Err(e) = view.resize(gpu, Geometry { logical, physical }) {
+            tracing::error!(output = %out.name, "{e:#}");
+            return;
+        }
+        // 새 크기는 다음 present에 반영된다. 루프가 멈춰 있으면 지금 한 장 그린다.
+        if !view.waiting_frame && !view.timer_armed {
+            self.draw_shader(idx);
+        }
+    }
+
+    /// GPU 서브서피스의 frame 콜백: fps 제한을 지키며 다음 프레임을 그린다.
+    pub fn on_frame(&mut self, surface: &WlSurface) {
+        let Some(idx) = self
+            .outputs
+            .iter()
+            .position(|o| matches!(&o.content, Content::Shader(v) if v.plane.surface == *surface))
+        else {
+            return;
+        };
+        let out = &mut self.outputs[idx];
+        let paused = out.user_paused;
+        let Content::Shader(view) = &mut out.content else {
+            return;
+        };
+        view.waiting_frame = false;
+        if paused || view.timer_armed {
+            return;
+        }
+        let Some(at) = view.due(Instant::now()) else {
+            self.draw_shader(idx);
+            return;
+        };
+        view.timer_armed = true;
+        let (output, view_id) = (out.id, view.id);
+        let timer = self
+            .handle
+            .insert_source(Timer::from_deadline(at), move |_, _, state| {
+                state.on_timer(output, view_id);
+                TimeoutAction::Drop
+            });
+        if let Err(e) = timer {
+            tracing::error!("failed to arm frame timer: {e}");
+            view.timer_armed = false;
+        }
+    }
+
+    fn on_timer(&mut self, output: u64, view_id: u64) {
+        let Some(idx) = self.index_by_id(output) else {
+            return;
+        };
+        let out = &mut self.outputs[idx];
+        let paused = out.user_paused;
+        let Content::Shader(view) = &mut out.content else {
+            return;
+        };
+        if view.id != view_id {
+            return;
+        }
+        view.timer_armed = false;
+        if !paused {
+            self.draw_shader(idx);
+        }
+    }
+
+    /// layer surface 기준 포인터 이벤트.
+    pub fn pointer_event(&mut self, surface: &WlSurface, kind: &PointerEventKind, pos: (f64, f64)) {
+        let Some(idx) = self.index_by_surface(surface) else {
+            return;
+        };
+        if let Content::Shader(view) = &mut self.outputs[idx].content {
+            view.pointer(kind, pos);
+        }
+    }
+
+    /// 디스패치마다: 끝난 요청에 응답하고, 쓰는 곳이 없어진 GPU를 해제한다.
+    fn after_dispatch(&mut self) {
+        self.flush_waiters();
+        if self.gpu.is_some()
+            && !self
+                .outputs
+                .iter()
+                .any(|o| matches!(o.content, Content::Shader(_)))
+        {
+            self.gpu = None;
+            tracing::info!("GPU released (no shader outputs)");
+        }
     }
 
     fn cmd_volume(
@@ -764,8 +997,8 @@ impl State {
         Ok(Response::ok())
     }
 
-    fn cmd_list(&self) -> Result<Response> {
-        let outputs = self.outputs.iter().map(status).collect();
+    fn cmd_list(&mut self) -> Result<Response> {
+        let outputs = self.outputs.iter_mut().map(status).collect();
         Ok(Response::data(serde_json::to_value(ListData { outputs })?))
     }
 
@@ -823,7 +1056,7 @@ fn info(wp: &Wallpaper) -> WallpaperInfo {
     }
 }
 
-fn status(out: &Output) -> OutputStatus {
+fn status(out: &mut Output) -> OutputStatus {
     let (width, height) = out.physical().unwrap_or_default();
     let mut pause_reasons = Vec::new();
     if out.user_paused {
@@ -851,6 +1084,10 @@ fn status(out: &Output) -> OutputStatus {
         scale: out.scale120 as f64 / SCALE_DENOMINATOR as f64,
         wallpaper: out.wallpaper.clone(),
         render_path: out.render_path(),
+        fps: match &mut out.content {
+            Content::Shader(view) => Some(view.take_fps()),
+            _ => None,
+        },
         volume: out.cfg.volume,
         mute: out.cfg.mute,
         state,

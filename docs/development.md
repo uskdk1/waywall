@@ -51,6 +51,7 @@ nix develop -c cargo test
 
 direnv 사용자는 `.envrc`에 `use flake`를 두면 디렉터리 진입 시 자동으로 셸이 로드됩니다.
 
+
 ## flake 구성
 
 ```

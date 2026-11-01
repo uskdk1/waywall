@@ -82,6 +82,8 @@ pub struct OutputStatus {
     pub scale: f64,
     pub wallpaper: Option<WallpaperInfo>,
     pub render_path: Option<RenderPath>,
+    /// 직전 `list` 이후 평균 fps. 프레임을 계속 내는 배경만.
+    pub fps: Option<f32>,
     pub volume: u8,
     pub mute: bool,
     pub state: PlayState,

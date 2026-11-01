@@ -68,10 +68,10 @@ default = "#88aaff"
 | 옵션 | 적용 타입 | 설명 |
 |---|---|---|
 | `interactive` | 전부 | `false`면 입력 영역을 비워 마우스 이벤트를 통과시킴 |
-| `fps` | shader, scene | 최대 fps. `0`이면 모니터 주사율 (`render.max_fps`가 상한) |
-| `render_scale` | shader, scene | 내부 렌더 해상도 배율 (예: `0.5`로 무거운 효과의 비용 1/4) |
+| `fps` | shader, scene | 최대 fps. `0`이면 frame 콜백마다(모니터 주사율). `render.max_fps`가 0이 아니면 그 값이 상한 |
+| `render_scale` | shader, scene | 내부 렌더 해상도 배율 (예: `0.5`로 무거운 효과의 비용 1/4). 전역 `render.render_scale`과 곱해짐 |
 | `fit` | image, video, scene | `cover`(채우고 자름) · `contain`(레터박스) · `fill`(늘림) |
-| `background` | image, video, web | `contain` 시 여백 색 / 웹 페이지의 투명한 부분 색 |
+| `background` | image, video, shader, web | `contain` 시 여백 색 / 셰이더 첫 프레임 전에 보이는 색 / 웹 페이지의 투명한 부분 색 |
 | `loop` | video | 반복 재생 |
 | `audio` | video, web | `false`면 항상 음소거 |
 | `speed` | video | 재생 속도 |
@@ -90,16 +90,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float d = distance(fragCoord, iPointer.xy);
     vec3 col = 0.5 + 0.5 * cos(iTime + uv.xyx + vec3(0, 2, 4));
     col += 0.4 * exp(-d * 0.01) * iPointer.z;               // 커서 주변 빛
-    col += 0.6 * exp(-(iTime - iClick.z) * 3.0) * exp(-distance(fragCoord, iClick.xy) * 0.02); // 클릭 파문
+    col += 0.6 * exp(-(iTime - iClick.z) * 3.0) * exp(-distance(fragCoord, iClick.xy) * 0.02) * step(0.5, iClick.w); // 클릭 파문 (w=0이면 클릭 전)
     fragColor = vec4(col, 1.0);
 }
 ```
 
-uniform은 프리앰블에서 인스턴스 이름 없는 uniform 블록(`layout(set=0, binding=0) uniform Globals {…};`)으로
-선언하므로 셰이더에서는 Shadertoy처럼 그냥 `iTime`으로 씁니다.
+실제로 컴파일되는 소스는 `assets/shaders/shadertoy/prelude.glsl` + 사용자 셰이더 + `assets/shaders/shadertoy/epilogue.glsl`입니다.
+프리앰블은 인스턴스 이름 없는 uniform 블록(`layout(set=0, binding=0) uniform Globals {…};`)을 선언하므로
+셰이더에서는 Shadertoy처럼 그냥 `iTime`으로 씁니다. 에필로그의 `main()`이 `gl_FragCoord`를 왼쪽 아래 원점으로
+바꿔 `mainImage`를 부릅니다. 두 파일은 사용자 assets 디렉터리에 같은 이름으로 두어 교체할 수 있습니다.
 
-naga GLSL 프론트엔드가 처리하지 못하는 구문이 있으면 오류가 `waywall list`에 표시됩니다.
-cargo feature `shaderc`로 빌드하면 shaderc(glslang)를 대체 컴파일러로 사용합니다.
+- 출력 색은 Shadertoy처럼 **변환 없이** 화면에 씁니다(sRGB가 아닌 swapchain 포맷). Shadertoy에서 보던 색 그대로입니다.
+- 셰이더 안의 줄 번호는 사용자 파일 기준으로 오류에 표시됩니다.
+- 아직 지원하지 않는 것: `iChannel0..3`(텍스처·버퍼 입력), 멀티패스, 사운드 셰이더. 쓰면 컴파일 오류가 됩니다.
+- naga GLSL 프론트엔드가 처리하지 못하는 구문이 있으면 오류가 `waywall list`와 `set`의 응답에 표시됩니다.
+  shaderc(glslang) 대체 컴파일러는 로드맵입니다.
 
 ### WGSL (`.wgsl`)
 wgpu 네이티브 셰이더 언어입니다. 다음 엔트리를 작성합니다.
@@ -112,24 +117,30 @@ fn main_image(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32
 }
 ```
 
-`g`는 waywall이 앞에 붙이는 `var<uniform> g: Globals;` 이며 필드는 아래 표의 snake_case
-(`resolution`, `time`, `time_delta`, `frame`, `date`, `mouse`, `pointer`, `click`)입니다.
+`g`는 waywall이 앞에 붙이는 `assets/shaders/shadertoy/prelude.wgsl`의 `var<uniform> g: Globals;` 이며 필드는 아래 표의 snake_case
+(`resolution`, `time`, `time_delta`, `frame`, `date`, `mouse`, `pointer`, `click`, 그리고 속성 `u_<이름>`)입니다.
+`frag_coord`는 WGSL 그대로 **왼쪽 위 원점**이고, `g.mouse`/`g.pointer`/`g.click`의 좌표는 GLSL과 같은 왼쪽 아래 원점입니다.
+화면을 덮는 삼각형을 그리는 버텍스 셰이더는 `assets/shaders/fullscreen.wgsl`입니다.
 
 ### 제공 uniform
 
 | GLSL 이름 | 타입 | 설명 |
 |---|---|---|
-| `iResolution` | `vec3` | 렌더 크기(물리 픽셀 × render_scale), z=1.0 |
+| `iResolution` | `vec3` | 렌더 크기(물리 픽셀 × 유효 `render_scale`), z=1.0. 아래 좌표는 모두 이 픽셀 단위 |
 | `iTime` | `float` | 시작 후 경과 초 (pause 중에는 멈춤) |
 | `iTimeDelta` | `float` | 직전 프레임과의 간격(초) |
 | `iFrame` | `int` | 프레임 번호 |
+| `iFrameRate` | `float` | 직전 간격 기준 순간 fps (`1 / iTimeDelta`, 첫 프레임은 0) |
 | `iDate` | `vec4` | 연, 월(0-11), 일, 자정 이후 초 |
-| `iMouse` | `vec4` | **Shadertoy 규칙**: xy=버튼 누른 동안의 위치, zw=누른 위치(누르는 중이면 z>0, 떼면 z<0) |
+| `iMouse` | `vec4` | **Shadertoy 규칙**(왼쪽 버튼만): xy=버튼 누른 동안의 위치, zw=누른 위치(누르는 중이면 z>0, 떼면 z<0. w는 누른 첫 프레임에만 양수) |
 | `iPointer` | `vec4` | **waywall 확장**: xy=현재 포인터 위치(호버 포함), z=포인터가 배경 위에 있으면 1, w=눌린 버튼 비트마스크(1=좌, 2=우, 4=중) |
-| `iClick` | `vec4` | **waywall 확장**: xy=마지막 클릭 위치, z=마지막 클릭 시각(`iTime` 기준), w=버튼 |
+| `iClick` | `vec4` | **waywall 확장**: xy=마지막 클릭 위치, z=마지막 클릭 시각(`iTime` 기준), w=버튼(1=좌, 2=우, 4=중; 클릭 전에는 0) |
 
 좌표계는 Shadertoy와 같이 **왼쪽 아래가 원점**입니다. `properties`는 `u_<이름>`으로 추가됩니다
-(`float`→`float`, `int`→`int`, `bool`→`int`, `color`→`vec4`).
+(`float`→`float`, `int`→`int`, `bool`→`int`, `color`→`vec4`). 색은 0–1 범위의 RGBA이며 변환(선형화, premultiply)하지 않습니다.
+
+`interactive = true`(셰이더 기본값)이면 배경 위에서 마우스를 움직일 때마다 데몬이 이벤트를 받습니다(정지 중에도).
+입력에 반응하지 않는 셰이더는 `interactive = false`로 두면 그 비용도 없습니다.
 
 ## 씬 배경
 

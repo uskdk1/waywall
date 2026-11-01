@@ -65,8 +65,18 @@ pub struct Render {
     pub gpu: GpuPreference,
     pub max_fps: u32,
     pub render_scale: f64,
+    pub present_mode: PresentMode,
+    pub frame_latency: u32,
     pub tonemap: String,
     pub hdr_format: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PresentMode {
+    Mailbox,
+    Fifo,
+    Immediate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +186,8 @@ pub struct ShaderOptions {
     pub fps: u32,
     pub render_scale: f64,
     pub interactive: bool,
+    /// 첫 프레임 전에 보이는 부모 surface 색.
+    pub background: Color,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
