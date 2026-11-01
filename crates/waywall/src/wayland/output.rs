@@ -29,6 +29,7 @@ use waywall_proto::ipc::{RenderPath, WallpaperInfo};
 use super::globals::{Globals, NoEvents, PixelBuffer};
 use crate::backend::image::{Decoded, Request};
 use crate::backend::shader::ShaderView;
+use crate::backend::video::VideoView;
 use crate::config::OutputConfig;
 use crate::daemon::State;
 use crate::fit::place;
@@ -63,6 +64,7 @@ pub enum Content {
     Color,
     Image(ShownImage),
     Shader(Box<ShaderView>),
+    Video(Box<VideoView>),
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +108,8 @@ pub struct Output {
     pub user_paused: bool,
     /// 다음 배경 로딩이 끝나면 응답할 `set` 요청들.
     pub waiters: Vec<u64>,
+    /// 첫 프레임을 기다리는 영상. 첫 프레임이 오면 `content`로 바꾼다(그때까지 이전 화면 유지).
+    pub incoming: Option<Box<VideoView>>,
     solid: Option<SolidBuffer>,
     plane: Option<Plane>,
 }
@@ -151,6 +155,7 @@ impl Output {
             error: None,
             user_paused: false,
             waiters: Vec::new(),
+            incoming: None,
             solid: None,
             plane: None,
         }
@@ -173,11 +178,12 @@ impl Output {
 
     /// `list`에 표시할 렌더 경로.
     pub fn render_path(&self) -> Option<RenderPath> {
-        match self.content {
+        match &self.content {
             Content::Nothing => None,
             Content::Color => Some(RenderPath::Solid),
             Content::Image(_) => Some(RenderPath::Shm),
             Content::Shader(_) => Some(RenderPath::Gpu),
+            Content::Video(v) => Some(v.mode.render_path()),
         }
     }
 
@@ -227,6 +233,17 @@ impl Output {
         Ok(())
     }
 
+    /// 첫 프레임을 붙인 영상으로 바꾼다. 영상 서브서피스는 이 부모 커밋과 함께 나타난다.
+    pub fn present_video(&mut self, ctx: &Ctx<'_>, view: Box<VideoView>) -> Result<()> {
+        let old_solid = self.set_solid(ctx, view.params.background)?;
+        let old_plane = self.plane.take();
+        set_input(ctx, self.surface(), view.params.interactive)?;
+        self.surface().commit();
+        drop((old_solid, old_plane));
+        self.content = Content::Video(view);
+        Ok(())
+    }
+
     /// GPU 서브서피스가 준비된 셰이더로 바꾼다. 첫 프레임 전에는 부모의 `background` 색이 보인다.
     pub fn present_shader(&mut self, ctx: &Ctx<'_>, view: ShaderView) -> Result<()> {
         let old_solid = self.set_solid(ctx, view.opts.background)?;
@@ -248,6 +265,12 @@ impl Output {
         if let Content::Image(img) = &self.content {
             let fit = img.opts.fit;
             self.place_plane(fit);
+        }
+        if let Content::Video(v) = &mut self.content {
+            v.relayout((w, h));
+        }
+        if let Some(v) = &mut self.incoming {
+            v.relayout((w, h));
         }
         self.surface().commit();
     }
@@ -278,6 +301,7 @@ impl Output {
 impl Drop for Output {
     fn drop(&mut self) {
         // 서브서피스(이미지, GPU)를 부모 layer surface보다 먼저 정리한다.
+        self.incoming = None;
         self.content = Content::Nothing;
         self.plane = None;
         self.viewport.destroy();
@@ -406,14 +430,18 @@ impl Drop for SolidBuffer {
     }
 }
 
-/// 셰이더/씬이 Vulkan으로 그리는 서브서피스. desync라서 present가 부모 커밋 없이 바로 반영된다.
-pub struct GpuPlane {
+/// 셰이더(Vulkan present)·영상(프레임마다 attach)용 서브서피스. desync라서 자기 커밋이 부모 커밋 없이 바로 반영된다.
+pub struct DesyncPlane {
     pub surface: WlSurface,
     subsurface: WlSubsurface,
     pub viewport: WpViewport,
 }
 
-impl GpuPlane {
+impl DesyncPlane {
+    pub fn subsurface(&self) -> &WlSubsurface {
+        &self.subsurface
+    }
+
     pub fn new(ctx: &Ctx<'_>, parent: &WlSurface) -> Result<Self> {
         let (subsurface, surface) = ctx.subcompositor.create_subsurface(parent.clone(), ctx.qh);
         subsurface.set_desync();
@@ -431,7 +459,7 @@ impl GpuPlane {
     }
 }
 
-impl Drop for GpuPlane {
+impl Drop for DesyncPlane {
     fn drop(&mut self) {
         self.viewport.destroy();
         self.subsurface.destroy();

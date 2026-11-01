@@ -16,7 +16,7 @@
 **결과 (2026-11-01, niri, 2×1920x1080):** `nix build`·`nix flake check` 통과, 단위 테스트 13개. 표시 후 8초간
 CPU tick 0, 자발적 문맥 전환 0회(깨어남 없음), 스레드 1개, RSS 3 MB. 디코딩(release) 30 ms, Lanczos 축소 포함 117 ms.
 niri는 `wp_single_pixel_buffer_v1`을 광고하지 않아 단색은 1×1 `wl_shm` 폴백으로 동작.
-GIF는 아직 첫 프레임만 표시(애니메이션은 M4의 영상 경로에서).
+GIF는 아직 첫 프레임만 표시(애니메이션은 M4의 영상 경로에서 — M4에서 해결).
 
 ## M2 — 설정 · IPC · CLI ✅
 - `config.toml` 로드/병합, IPC 서버, `set` / `list` / `reload` / `quit` / `pause` / `resume`
@@ -46,12 +46,20 @@ swapchain은 Bgra8Unorm(Shadertoy와 같은 색). 단위 테스트 30개.
 커서 호버·클릭 반응은 사용자가 직접 확인. `render.max_fps` 기본값을 0(모니터 주사율)으로 바꾼 뒤 240 Hz HDMI 출력에서 약 218fps(CPU 약 12%, 내장 GPU 거의 최대 클럭), `waywall list`에 실측 fps 표시.
 **미확인:** HiDPI(분수 스케일) 출력에서의 선명도 — 이 환경의 두 출력은 모두 스케일 1.
 
-## M4 — 동영상 (zero-copy)
+## M4 — 동영상 (zero-copy) ✅
 - GStreamer 파이프라인, VA-API 디코딩 → dmabuf → `zwp_linux_dmabuf_v1` → 서브서피스
 - dmabuf feedback 기반 caps, shm 폴백, 반복 재생, GIF
 - 오디오 + `waywall volume`
 
 **완료 기준:** 4K60 영상이 끊김 없이 반복, `RUST_LOG`에 dmabuf 경로 확인, CPU 사용량이 디코딩 수준에 머무름.
+
+**결과 (2026-11-01, niri, Intel Iris Xe / iHD, GStreamer 1.28.7):** 4K60 HEVC·1080p60 H.264가 dmabuf 경로(`list`에 `dmabuf`, 로그 `mode=Dmabuf`)로
+60fps, 데몬 CPU 2–4%. 6초 영상이 이음새 없이 반복(segment seek). dmabuf `wl_buffer`는 디코더 풀 크기(11개)에서 더 늘지 않음.
+`hwdec = false`(소프트웨어 디코딩 + 복사)는 같은 1080p60에 CPU 69%. `pause` 시 CPU 0, 영상을 끄면 깨어남 0.
+움직이는 GIF는 shm 경로로 약 10fps·CPU 1%. 오디오 스트림이 PipeWire에 `waywall`로 나감.
+**구현 중 발견:** VA 디코더는 받는 쪽이 `VideoMeta`를 지원한다고 알려야 dmabuf를 내보내므로 appsink 패드의 allocation 쿼리에 추가.
+libav GIF 디먹서는 비flush segment seek를 처리하지 못해 GIF만 flush seek로 반복.
+**미확인:** 볼륨 크기 변화(귀로 확인 필요), 하드웨어 디코더가 없는 환경에서 dmabuf → shm 자동 폴백(초기 구현 중 협상 실패로 우연히 동작은 확인).
 
 ## M5 — 가림 감지
 - frame 타임아웃 → foreign_toplevel → (feature) niri

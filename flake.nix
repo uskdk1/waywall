@@ -37,7 +37,21 @@
           pkg-config
           makeWrapper
         ];
-        buildInputs = with pkgs; [ wayland ];
+        gst = pkgs.gst_all_1;
+        buildInputs = [
+          pkgs.wayland
+          gst.gstreamer
+          gst.gst-plugins-base
+        ];
+        # 영상 재생에 쓰는 GStreamer 플러그인 (docs/development.md). 시스템 플러그인은 쓰지 않는다.
+        gstPlugins = [
+          gst.gstreamer
+          gst.gst-plugins-base # playbin3, typefind, videoconvert, appsink
+          gst.gst-plugins-good # mp4/matroska 디먹서, pulsesink
+          gst.gst-plugins-bad # va 하드웨어 디코더
+          gst.gst-libav # 소프트웨어 폴백, GIF
+        ];
+        gstPluginPath = lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" gstPlugins;
         # wgpu가 dlopen하는 Vulkan 로더. GPU 드라이버(ICD)는 시스템 것 (docs/development.md)
         runtimeLibs = with pkgs; [
           wayland
@@ -67,7 +81,8 @@
           // {
             postFixup = ''
               wrapProgram $out/bin/waywall \
-                --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs}
+                --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs} \
+                --set GST_PLUGIN_SYSTEM_PATH_1_0 ${gstPluginPath}
             '';
             meta = {
               description = "Live wallpaper daemon for Wayland compositors";
@@ -116,8 +131,11 @@
             cargo-edit
             vulkan-tools
             vulkan-validation-layers
+            libva-utils # vainfo
+            gst_all_1.gstreamer # gst-inspect-1.0, gst-launch-1.0
           ]);
           LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
+          GST_PLUGIN_SYSTEM_PATH_1_0 = gstPluginPath;
           # 디버그 빌드의 wgpu가 검증 레이어를 찾도록
           VK_LAYER_PATH = "${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d";
         };

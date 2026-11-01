@@ -29,7 +29,9 @@ use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, QueueHandle};
-use waywall_proto::config::{Config, Fill, FillOrPrevious, ImageOptions, LayerKind, ShaderOptions};
+use waywall_proto::config::{
+    Config, Fill, FillOrPrevious, ImageOptions, LayerKind, ShaderOptions, VideoOptions,
+};
 use waywall_proto::ipc::{
     ListData, OutputStatus, PauseReason, PlayState, Reason, ReasonSource, Request, Response,
     WallpaperInfo,
@@ -39,6 +41,9 @@ use waywall_proto::project::WallpaperKind;
 use crate::assets::Assets;
 use crate::backend::image::{self, Decoded};
 use crate::backend::shader::{Geometry, ShaderSpec, ShaderView};
+use crate::backend::video::{
+    self, Mode as VideoMode, VideoEvent, VideoMsg, VideoParams, VideoView,
+};
 use crate::config::{Layers, OutputConfig, expand_path};
 use crate::config_edit::{self, Target};
 use crate::gpu::Gpu;
@@ -47,8 +52,14 @@ use crate::ipc::{self, Clients};
 use crate::properties;
 use crate::runtime::{self, Runtime};
 use crate::wallpaper::{self, Source, Wallpaper};
+use crate::wayland::dmabuf::DrmFormat;
 use crate::wayland::globals::Globals;
-use crate::wayland::output::{Content, Ctx, GpuPlane, Output, Pending, Purpose, SCALE_DENOMINATOR};
+use crate::wayland::output::{
+    Content, Ctx, DesyncPlane, Output, Pending, Purpose, SCALE_DENOMINATOR,
+};
+use smithay_client_toolkit::dmabuf::DmabufState;
+use wayland_client::protocol::wl_buffer::WlBuffer;
+use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1;
 
 pub struct State {
     pub qh: QueueHandle<State>,
@@ -82,6 +93,13 @@ pub struct State {
     handle: LoopHandle<'static, State>,
     /// shader/scene이 있을 때만 존재한다.
     gpu: Option<Gpu>,
+
+    pub dmabuf: DmabufState,
+    /// 기본 dmabuf feedback에서 받은 포맷 (선호 순).
+    pub dmabuf_formats: Vec<DrmFormat>,
+    /// feedback 이벤트를 계속 받으려면 살아 있어야 한다.
+    _dmabuf_feedback: Option<ZwpLinuxDmabufFeedbackV1>,
+    videos: Sender<VideoMsg>,
     next_view: u64,
 }
 
@@ -118,12 +136,20 @@ enum Prepared {
         wallpaper: Wallpaper,
         spec: Box<ShaderSpec>,
     },
+    /// 영상 또는 움직이는 GIF.
+    Video {
+        wallpaper: Wallpaper,
+        path: PathBuf,
+        params: VideoParams,
+    },
 }
 
 impl Prepared {
     fn wallpaper(&self) -> &Wallpaper {
         match self {
-            Prepared::Image { wallpaper, .. } | Prepared::Shader { wallpaper, .. } => wallpaper,
+            Prepared::Image { wallpaper, .. }
+            | Prepared::Shader { wallpaper, .. }
+            | Prepared::Video { wallpaper, .. } => wallpaper,
         }
     }
 }
@@ -141,6 +167,15 @@ pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
     WaylandSource::new(conn.clone(), queue)
         .insert(handle.clone())
         .map_err(|e| anyhow!("failed to insert Wayland source: {e}"))?;
+
+    let (videos, video_rx): (Sender<VideoMsg>, Channel<VideoMsg>) = channel();
+    handle
+        .insert_source(video_rx, |ev, _, state| {
+            if let ChannelEvent::Msg(msg) = ev {
+                state.on_video(msg);
+            }
+        })
+        .map_err(|e| anyhow!("failed to insert video channel: {e}"))?;
 
     let (images, image_rx): (Sender<ImageDone>, Channel<ImageDone>) = channel();
     handle
@@ -161,6 +196,9 @@ pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
 
     insert_listener(&handle, listener)?;
 
+    // v4 기본 feedback으로 영상 버퍼 포맷을 정한다. 없으면 v3 modifier 이벤트 목록, 그것도 없으면 shm.
+    let dmabuf = DmabufState::new(&globals, &qh);
+    let dmabuf_feedback = dmabuf.get_default_feedback(&qh).ok();
     let compositor = CompositorState::bind(&globals, &qh).context("wl_compositor is required")?;
     let subcompositor = SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)
         .context("wl_subcompositor is required")?;
@@ -192,6 +230,10 @@ pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
         conn,
         handle,
         gpu: None,
+        _dmabuf_feedback: dmabuf_feedback,
+        dmabuf,
+        dmabuf_formats: Vec::new(),
+        videos,
         next_view: 0,
     };
 
@@ -432,6 +474,7 @@ impl State {
                 if purpose != Purpose::Loading {
                     out.next_generation();
                     out.pending = None;
+                    out.incoming = None;
                 }
                 if let Err(e) = out.present_color(&ctx, c) {
                     tracing::error!(output = %out.name, "{e:#}");
@@ -458,6 +501,13 @@ impl State {
                 let opts: ImageOptions =
                     self.layers
                         .type_options(wp.kind, wp.options.as_ref(), cfg)?;
+                if is_gif(path) && video::gif_is_animated(path)? {
+                    return Ok(Prepared::Video {
+                        path: path.clone(),
+                        params: VideoParams::gif(&opts),
+                        wallpaper: wp,
+                    });
+                }
                 Ok(Prepared::Image {
                     path: path.clone(),
                     wallpaper: wp,
@@ -488,6 +538,16 @@ impl State {
                     wallpaper: wp,
                 })
             }
+            (WallpaperKind::Video, Source::File(path)) => {
+                let opts: VideoOptions =
+                    self.layers
+                        .type_options(wp.kind, wp.options.as_ref(), cfg)?;
+                Ok(Prepared::Video {
+                    path: path.clone(),
+                    params: VideoParams::video(&opts, cfg.volume, cfg.mute),
+                    wallpaper: wp,
+                })
+            }
             (kind, _) => Err(anyhow!("{} wallpapers are not implemented yet", kind.key())),
         }
     }
@@ -511,6 +571,11 @@ impl State {
         let (path, opts) = match prepared {
             Prepared::Image { path, opts, .. } => (path, opts),
             Prepared::Shader { spec, .. } => return self.show_shader(idx, *spec, purpose),
+            Prepared::Video {
+                wallpaper,
+                path,
+                params,
+            } => return self.show_video(idx, &path, wallpaper.name, params, purpose),
         };
         let out = &self.outputs[idx];
         let request = image::Request {
@@ -539,6 +604,7 @@ impl State {
             out.loading = Some(pending);
         } else {
             out.pending = Some(pending);
+            out.incoming = None;
         }
         let (output, tx) = (out.id, self.images.clone());
         let req = request.clone();
@@ -776,6 +842,12 @@ impl State {
             let out = &mut self.outputs[idx];
             out.user_paused = paused;
             tracing::info!(output = %out.name, paused, "user pause");
+            if let Content::Video(view) = &mut out.content {
+                view.set_paused(paused);
+            }
+            if let Some(view) = &mut out.incoming {
+                view.set_paused(paused);
+            }
             if let Content::Shader(view) = &mut out.content {
                 view.set_paused(paused);
                 // 멈춰 있던 렌더 루프는 한 장 그려서 다시 돌린다.
@@ -785,6 +857,170 @@ impl State {
             }
         }
         Ok(Response::ok())
+    }
+
+    // ── 영상 ──────────────────────────────────────────────────────────────
+
+    fn show_video(
+        &mut self,
+        idx: usize,
+        path: &std::path::Path,
+        name: String,
+        params: VideoParams,
+        purpose: Purpose,
+    ) -> Result<()> {
+        if purpose == Purpose::Loading {
+            bail!("a video cannot be used as appearance.loading");
+        }
+        let formats = self.dmabuf_formats();
+        // hwdec이면 dmabuf부터 시도하고, 컴포지터가 dmabuf를 안 받으면 바로 shm 폴백.
+        let mode = match (params.hwdec, formats.is_empty()) {
+            (true, false) => VideoMode::Dmabuf,
+            (true, true) => VideoMode::Shm { fallback: true },
+            (false, _) => VideoMode::Shm { fallback: false },
+        };
+        self.start_video(idx, path, name, params, mode, purpose)
+    }
+
+    fn start_video(
+        &mut self,
+        idx: usize,
+        path: &std::path::Path,
+        name: String,
+        params: VideoParams,
+        mode: VideoMode,
+        purpose: Purpose,
+    ) -> Result<()> {
+        let out = &self.outputs[idx];
+        let logical = out.logical.context("output not configured yet")?;
+        let plane = DesyncPlane::new(&ctx!(self), out.surface())?;
+        let id = self.next_view;
+        self.next_view += 1;
+        let view = VideoView::new(
+            path,
+            name,
+            params,
+            mode,
+            &self.dmabuf_formats(),
+            plane,
+            logical,
+            self.videos.clone(),
+            out.id,
+            id,
+        )?;
+        let out = &mut self.outputs[idx];
+        let generation = out.next_generation();
+        out.pending = Some(Pending {
+            generation,
+            purpose,
+        });
+        out.incoming = Some(Box::new(view));
+        Ok(())
+    }
+
+    fn on_video(&mut self, msg: VideoMsg) {
+        let Some(idx) = self.index_by_id(msg.output) else {
+            return;
+        };
+        let out = &mut self.outputs[idx];
+        let paused = out.user_paused;
+        let incoming = out.incoming.as_ref().is_some_and(|v| v.id == msg.view);
+        let view = match (&mut out.content, &mut out.incoming) {
+            (_, Some(v)) if v.id == msg.view => v,
+            (Content::Video(v), _) if v.id == msg.view => v,
+            _ => return,
+        };
+        let result = match msg.event {
+            VideoEvent::Frame(sample) => {
+                let ctx = ctx!(self);
+                view.present(&ctx, &self.dmabuf, sample)
+            }
+            VideoEvent::AsyncDone => view.on_async_done(paused),
+            VideoEvent::SegmentDone => view.on_segment_done(),
+            VideoEvent::Eos => {
+                tracing::debug!(video = %view.name, "end of stream");
+                Ok(())
+            }
+            VideoEvent::Error {
+                message,
+                not_negotiated,
+            } => {
+                if not_negotiated && view.mode == VideoMode::Dmabuf {
+                    // 하드웨어 디코더가 없거나 컴포지터와 포맷이 안 맞음: 복사 경로로 다시.
+                    tracing::warn!(video = %view.name, "dmabuf path failed ({message}), falling back to shm");
+                    let (path, name, params) = (
+                        view.path().to_owned(),
+                        view.name.clone(),
+                        view.params.clone(),
+                    );
+                    let purpose = out.pending.map_or(Purpose::Main, |p| p.purpose);
+                    let r = self.start_video(
+                        idx,
+                        &path,
+                        name,
+                        params,
+                        VideoMode::Shm { fallback: true },
+                        purpose,
+                    );
+                    if let Err(e) = r {
+                        self.video_failed(idx, incoming, e);
+                    }
+                    return;
+                }
+                Err(anyhow!("{message}"))
+            }
+        };
+        if let Err(e) = result {
+            self.video_failed(idx, incoming, e);
+            return;
+        }
+        // 첫 프레임이 붙었으면 이전 화면과 바꾼다.
+        let out = &mut self.outputs[idx];
+        if incoming && out.incoming.as_ref().is_some_and(|v| v.shown_first) {
+            let view = out.incoming.take().expect("checked above");
+            let purpose = out.pending.take().map_or(Purpose::Main, |p| p.purpose);
+            out.loading = None;
+            let ctx = ctx!(self);
+            if let Err(e) = out.present_video(&ctx, view) {
+                self.failed(idx, purpose, e);
+                return;
+            }
+            tracing::info!(output = %out.name, path = ?out.render_path(), "video playing");
+            if purpose == Purpose::Main {
+                self.settle(idx, Ok(()));
+            }
+        }
+    }
+
+    fn video_failed(&mut self, idx: usize, incoming: bool, err: anyhow::Error) {
+        let out = &mut self.outputs[idx];
+        if incoming {
+            out.incoming = None;
+            let purpose = out.pending.take().map_or(Purpose::Main, |p| p.purpose);
+            self.failed(idx, purpose, err);
+        } else {
+            // 재생 중 오류: 마지막 프레임을 그대로 두고 상태만 알린다.
+            tracing::error!(output = %out.name, "{err:#}");
+            out.error = Some(format!("{err:#}"));
+        }
+    }
+
+    /// 컴포지터가 놓은 dmabuf 버퍼의 샘플을 GStreamer에 돌려준다.
+    pub fn video_buffer_released(&mut self, buffer: &WlBuffer) {
+        for out in &mut self.outputs {
+            let views = [
+                match &mut out.content {
+                    Content::Video(v) => Some(v),
+                    _ => None,
+                },
+                out.incoming.as_mut(),
+            ];
+            for v in views.into_iter().flatten() {
+                if v.released(buffer) {
+                    return;
+                }
+            }
+        }
     }
 
     // ── 셰이더 ────────────────────────────────────────────────────────────
@@ -802,7 +1038,7 @@ impl State {
             logical: out.logical.context("output not configured yet")?,
             physical: out.physical().context("output not configured yet")?,
         };
-        let plane = GpuPlane::new(&ctx!(self), out.surface())?;
+        let plane = DesyncPlane::new(&ctx!(self), out.surface())?;
         let surface = match &self.gpu {
             Some(gpu) => gpu.create_surface(&plane.surface)?,
             None => {
@@ -992,6 +1228,12 @@ impl State {
             let out = &mut self.outputs[idx];
             out.cfg.volume = cfg.volume;
             out.cfg.mute = cfg.mute;
+            if let Content::Video(v) = &mut out.content {
+                v.set_volume(cfg.volume, cfg.mute);
+            }
+            if let Some(v) = &mut out.incoming {
+                v.set_volume(cfg.volume, cfg.mute);
+            }
             tracing::info!(output = %name, volume = cfg.volume, mute = cfg.mute, "volume");
         }
         Ok(Response::ok())
@@ -1086,6 +1328,7 @@ fn status(out: &mut Output) -> OutputStatus {
         render_path: out.render_path(),
         fps: match &mut out.content {
             Content::Shader(view) => Some(view.take_fps()),
+            Content::Video(view) => Some(view.take_fps()),
             _ => None,
         },
         volume: out.cfg.volume,
@@ -1103,4 +1346,9 @@ fn layer_kind(k: LayerKind) -> Layer {
         LayerKind::Top => Layer::Top,
         LayerKind::Overlay => Layer::Overlay,
     }
+}
+
+fn is_gif(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gif"))
 }

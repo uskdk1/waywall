@@ -77,17 +77,33 @@ assets/              # 데이터: defaults.toml, 내장 WGSL 셰이더, 스프�
 
 ### 영상: 복사 없는 dmabuf 경로
 ```
-uridecodebin3 ─▶ (vah264dec / vah265dec / vaav1dec …)  video/x-raw(memory:DMABuf)
-                                                   └─▶ appsink ─▶ 데몬 채널
-              └─▶ audioconvert ─▶ volume ─▶ autoaudiosink (PipeWire/Pulse)
+playbin3 (file:// URI)
+ ├ video-sink: appsink   caps = video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format={컴포지터 feedback 포맷}
+ │    └▶ (GStreamer 스레드) 샘플 → calloop 채널 → 메인: zwp_linux_buffer_params_v1 → wl_buffer → 서브서피스
+ └ audio-sink: autoaudiosink (PipeWire/Pulse), playbin3의 volume / mute 속성
 ```
-- appsink 샘플의 dmabuf fd/stride/offset/modifier로 `zwp_linux_buffer_params_v1`을 통해 `wl_buffer` 생성
-  (GstBuffer 단위로 캐시, 컴포지터의 `release` 시 GStreamer에 반환)
-- 서브서피스에 attach, `wp_viewporter`의 source(cover 시 crop) / destination(출력 크기)로 맞춤
-- 허용 포맷/모디파이어는 `zwp_linux_dmabuf_v1` v4 feedback으로 받아 appsink caps에 반영
-- 반복 재생은 segment seek(이음새 없는 반복), 일시정지는 파이프라인 `PAUSED`
-- dmabuf를 못 받으면(하드웨어 디코더 없음) 소프트웨어 디코딩 → `wl_shm` 폴백
+- 디코더는 playbin3가 고름. VA 디코더(`vah264dec` 등)가 dmabuf를 내면 복사 없이 그대로 컴포지터로 감
+  (playbin3 `native-video` 플래그로 중간 변환 요소를 넣지 않음)
+- 허용 포맷/모디파이어는 `zwp_linux_dmabuf_v1` v4 기본 feedback(포맷 테이블 + tranche)으로 받아 appsink caps에 넣음
+- 샘플의 `VideoMeta`(plane별 offset/stride)와 `DmaBufMemory` fd로 `wl_buffer` 생성. 디코더 버퍼 풀이 같은 dmabuf를
+  돌려 쓰므로 **dmabuf(inode, offset) 단위로 `wl_buffer`를 캐시**해 매 프레임 import하지 않음
+- `GstSample`은 그 `wl_buffer`의 `release`가 올 때까지 잡아 둠(화면에 있는 것 + 대기 중 하나). 그 뒤 풀로 돌아감
+- 타이밍: appsink `sync=true` → 파이프라인 시계(오디오)에 맞춰 샘플이 오면 attach + 커밋. frame 콜백은 쓰지 않음
+- 서브서피스는 desync라서 프레임마다 부모를 커밋하지 않음. `wp_viewporter`의 source(cover 시 crop) / destination으로 맞춤
+- 반복: segment seek. `SEGMENT_DONE`에서 다시 segment seek하므로 이음새가 없음. `speed`는 seek의 rate
+- 일시정지: 파이프라인 `PAUSED` (`pause`, M5의 가림 정지)
+- 버스 메시지는 sync handler에서 calloop 채널로 넘겨 메인 스레드에서 처리 (GLib 메인 루프 없음)
+- **폴백:** dmabuf 협상이 실패하면(`not-negotiated`: 하드웨어 디코더 없음, 코덱 미지원 등) 같은 파일로 파이프라인을
+  다시 만들어 `videoconvert ! appsink(BGRx)` → `wl_shm` 버퍼 링(프레임당 복사 1회). `list`의 `render_path`가 `shm-fallback`이 되고 경고 로그
+- `hwdec = false`면 처음부터 shm 경로 + 디코더 선택에서 하드웨어 디코더 제외 (`render_path = shm`)
+- YUV→RGB 변환은 컴포지터가 함. 색 공간 지정(`wp_color_representation_v1`, staging)은 로드맵
 - 레터박스(`contain`)의 여백은 부모 surface에 `background` 옵션 색의 단색 버퍼(`wp_single_pixel_buffer_v1`, 없으면 1×1 `wl_shm`)를 viewporter로 늘려서 채움
+
+### GIF
+- 프레임이 2장 이상인 GIF만 영상 경로(GStreamer, shm 경로)로 재생하고, 1장짜리는 정적 이미지 경로로 표시
+- 옵션은 `[types.image]`(fit, background, interactive)를 따르고, 항상 반복·무음
+- 반복은 flush seek: GIF를 여는 libav 디먹서가 비flush segment seek를 처리하지 못해(시간이 0으로 돌아간 프레임이 한꺼번에 쏟아짐) 영상과 달리 이음새 없는 반복을 쓰지 않음
+- GStreamer를 한 번 초기화하면 GLib 스레드 풀의 대기 스레드(`pool-spawner`) 하나가 데몬이 끝날 때까지 남음 (깨어나지 않음)
 
 ### 셰이더/씬: wgpu
 - `wgpu::Instance`는 Vulkan 백엔드만 활성화, 어댑터는 설정 `render.gpu`(기본 `low-power`)로 선택

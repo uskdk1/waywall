@@ -16,7 +16,7 @@ use crate::daemon::State;
 use crate::gpu::shadertoy::{Compiled, Inputs, UniformLayout};
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
 use crate::properties::Property;
-use crate::wayland::output::GpuPlane;
+use crate::wayland::output::DesyncPlane;
 
 /// 리눅스 input-event-codes.h의 버튼 코드 → `iPointer.w`/`iClick.w` 비트.
 const BUTTONS: [(u32, u32); 3] = [(0x110, 1), (0x111, 2), (0x112, 4)];
@@ -74,7 +74,7 @@ pub struct ShaderView {
     /// `list`의 fps 측정: 마지막 측정 이후 그린 프레임 수와 그 시작 시각.
     stats_frames: u32,
     stats_since: Instant,
-    pub plane: GpuPlane,
+    pub plane: DesyncPlane,
 }
 
 impl ShaderView {
@@ -82,7 +82,7 @@ impl ShaderView {
     pub fn new(
         gpu: &Gpu,
         surface: wgpu::Surface<'static>,
-        plane: GpuPlane,
+        plane: DesyncPlane,
         spec: ShaderSpec,
         render: &Render,
         geometry: Geometry,

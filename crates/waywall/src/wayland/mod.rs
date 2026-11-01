@@ -1,5 +1,6 @@
 //! SCTK 핸들러 구현.
 
+pub mod dmabuf;
 pub mod globals;
 pub mod output;
 
