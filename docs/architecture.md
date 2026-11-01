@@ -1,0 +1,189 @@
+# 아키텍처
+
+## 설계 목표
+
+1. **상시 실행 비용 최소화** — 바탕화면은 하루 종일 돌아가므로 사소한 비용도 줄인다
+2. **표현력** — 빛, 파티클, 후처리(블룸) 같은 GPU 효과를 자체 씬 렌더러로 표현
+3. **표준 프로토콜 우선** — [protocols.md](protocols.md)
+4. **설정 주도** — 코드에는 색·모양·수치를 하드코딩하지 않음. 기본값은 `assets/defaults.toml`, 내장 셰이더/스프라이트는
+   `assets/` 파일이며 모두 사용자 설정/assets로 덮어쓸 수 있음 ([config.md](config.md#원칙-코드에는-모양도-숫자도-없다))
+
+이를 위해 상주 데몬은 GTK 없이 Wayland와 Vulkan(wgpu)을 직접 다루고,
+GTK/WebKit이 꼭 필요한 웹 배경만 별도 헬퍼 프로세스로 분리합니다.
+
+## 프로세스 구성
+
+```
+ ┌──────────────┐  JSON-lines / Unix socket  ┌───────────────────────────────────────────────┐
+ │ waywall set  │ ─────────────────────────▶ │ waywall daemon  (GTK 없음)                     │
+ │ waywall list │ ◀───────────────────────── │                                               │
+ └──────────────┘ $XDG_RUNTIME_DIR/         │  calloop 이벤트 루프 (단일 스레드)              │
+                  waywall.sock              │   ├ Wayland (smithay-client-toolkit)          │
+                                            │   ├ IPC 소켓                                   │
+                                            │   ├ 타이머 (fps 제한, 가림 타임아웃)            │
+                                            │   └ 채널 (GStreamer, 웹 헬퍼)                  │
+                                            │                                               │
+                                            │  Output(DP-1)          Output(eDP-1)          │
+                                            │   ├ layer surface       ├ layer surface       │
+                                            │   ├ Backend             ├ Backend             │
+                                            │   │  image  → wl_shm + viewporter            │
+                                            │   │  video  → GStreamer → dmabuf subsurface  │
+                                            │   │  shader → wgpu (Vulkan)                  │
+                                            │   │  scene  → wgpu (Vulkan)                  │
+                                            │   │  web    → 헬퍼에 위임                     │
+                                            │   └ Visibility 상태                           │
+                                            │                                               │
+                                            │  Gpu (지연 생성, 출력 간 공유)                  │
+                                            └───────────────┬───────────────────────────────┘
+                                                            │ stdin/stdout JSON-lines
+                                                            ▼
+                                            ┌───────────────────────────────────────────────┐
+                                            │ waywall-web  (웹 배경이 있을 때만 실행)          │
+                                            │  GTK4 + gtk4-layer-shell + WebKitGTK 6         │
+                                            │  출력별 layer 창 + WebView                      │
+                                            └───────────────────────────────────────────────┘
+```
+
+## Cargo 워크스페이스
+
+```
+crates/
+├─ waywall/          # 데몬 + CLI 바이너리 (GTK에 링크하지 않음)
+├─ waywall-web/      # 웹 헬퍼 바이너리 (GTK4, WebKitGTK)
+└─ waywall-proto/    # 공유 타입: IPC 메시지, 헬퍼 프로토콜, 설정/배경 스키마 (serde)
+assets/              # 데이터: defaults.toml, 내장 WGSL 셰이더, 스프라이트 (include_dir로 내장, 사용자 assets로 덮어씀)
+```
+
+### asset 해석
+`Assets::open("shaders/tonemap/aces.wgsl")` 같은 상대 경로 요청은 `assets.dir`(사용자) → 내장 순으로 찾습니다.
+셰이더 파일은 `reload` 시 다시 읽으므로 데몬 재시작 없이 렌더 단계를 바꿔 볼 수 있습니다.
+
+데몬이 GTK를 링크하지 않으므로 웹 배경을 쓰지 않으면 GTK/WebKit 라이브러리는 메모리에
+올라오지도 않습니다.
+
+## 백엔드별 렌더 경로
+
+배경 타입마다 **가장 싼 경로**를 고릅니다. GPU(wgpu) 장치는 shader/scene 배경이 처음 필요할 때
+만들고, 쓰는 출력이 없어지면 해제합니다.
+
+| 타입 | 경로 | 상시 비용 |
+|---|---|---|
+| image (정적) | 디코딩 1회 → `wl_shm` 버퍼 → `wp_viewporter`로 crop/scale | **0** — 한 번 커밋 후 아무것도 안 함. 스케일은 컴포지터가 처리 |
+| image (GIF) | video 경로 재사용 (GStreamer 소프트웨어 디코딩 → `wl_shm`) | 프레임당 작은 CPU 복사 |
+| video | GStreamer 하드웨어 디코딩(VA-API) → dmabuf → `zwp_linux_dmabuf_v1` 버퍼 → 서브서피스 + viewporter | 디코딩만. **우리 GPU 작업 0, 복사 0** |
+| shader | wgpu 렌더 패스 1개, frame 콜백 + fps 제한으로 구동 | 셰이더 비용 그대로 |
+| scene | wgpu 렌더 그래프 (HDR 오프스크린 → 레이어 → 파티클 compute → 조명 → 블룸 → 톤매핑) | 씬 복잡도에 비례, `render_scale`로 조절 |
+| web | 웹 헬퍼 프로세스 | WebKit 비용 |
+
+### 영상: 복사 없는 dmabuf 경로
+```
+uridecodebin3 ─▶ (vah264dec / vah265dec / vaav1dec …)  video/x-raw(memory:DMABuf)
+                                                   └─▶ appsink ─▶ 데몬 채널
+              └─▶ audioconvert ─▶ volume ─▶ autoaudiosink (PipeWire/Pulse)
+```
+- appsink 샘플의 dmabuf fd/stride/offset/modifier로 `zwp_linux_buffer_params_v1`을 통해 `wl_buffer` 생성
+  (GstBuffer 단위로 캐시, 컴포지터의 `release` 시 GStreamer에 반환)
+- 서브서피스에 attach, `wp_viewporter`의 source(cover 시 crop) / destination(출력 크기)로 맞춤
+- 허용 포맷/모디파이어는 `zwp_linux_dmabuf_v1` v4 feedback으로 받아 appsink caps에 반영
+- 반복 재생은 segment seek(이음새 없는 반복), 일시정지는 파이프라인 `PAUSED`
+- dmabuf를 못 받으면(하드웨어 디코더 없음) 소프트웨어 디코딩 → `wl_shm` 폴백
+- 레터박스(`contain`)의 여백은 부모 surface에 `background` 옵션 색의 단색 버퍼(`wp_single_pixel_buffer_v1`, 없으면 1×1 `wl_shm`)를 viewporter로 늘려서 채움
+
+### 셰이더/씬: wgpu
+- `wgpu::Instance`는 Vulkan 백엔드만 활성화, 어댑터는 설정 `render.gpu`(기본 `low-power`)로 선택
+- `Gpu` 하나(Device/Queue)를 모든 출력이 공유, 출력마다 `wgpu::Surface` (raw-window-handle의 Wayland 핸들)
+- **frame 콜백으로 직접 페이싱:** frame 콜백을 받은 뒤에만 그리고 present함
+  (가려진 surface에서 Vulkan FIFO present가 막히는 문제도 이렇게 피함)
+- fps 제한: 마지막 프레임 이후 `1/fps`가 지나지 않았으면 다음 콜백까지 건너뜀
+- 분수 스케일: `wp_fractional_scale_v1`의 값으로 물리 픽셀 크기의 swapchain을 만들고 viewporter destination을 논리 크기로 설정
+- `render_scale < 1`이면 더 작은 오프스크린에 그리고 업스케일
+
+씬 렌더러 세부는 [wallpaper-format.md](wallpaper-format.md#씬-배경).
+
+## 데몬 모듈
+
+```
+crates/waywall/src/
+├─ main.rs            # clap: daemon | set | pause | resume | volume | list | reload | quit
+├─ daemon.rs          # calloop 루프 구성, 출력 생성/제거, IPC 요청 처리
+├─ wayland/
+│  ├─ mod.rs          # SCTK 핸들러 (출력, layer, seat/포인터 + 커서, scale)
+│  ├─ globals.rs      # SCTK가 감싸지 않는 전역 객체: viewporter, fractional-scale, single-pixel-buffer
+│  ├─ output.rs       # Output: layer surface, 단색 버퍼, 이미지 서브서피스, viewport
+│  └─ dmabuf.rs       # (M4) linux-dmabuf feedback, wl_buffer 생성/캐시
+├─ fit.rs             # fit 모드 → viewporter source/destination, downscale 크기
+├─ gpu/
+│  ├─ mod.rs          # Gpu 지연 생성, Surface 구성
+│  └─ shadertoy.rs    # GLSL 프리앰블 래핑 → naga → SPIR-V
+├─ backend/
+│  ├─ mod.rs          # trait Backend
+│  ├─ image.rs
+│  ├─ video.rs        # GStreamer 파이프라인, 샘플 → 버퍼
+│  ├─ shader.rs
+│  ├─ scene/          # 씬 로더, 렌더 그래프, 파티클(compute), 조명, 블룸
+│  └─ web.rs          # 헬퍼 프로세스 관리 프록시
+├─ visibility/
+│  ├─ mod.rs          # 사유 합성
+│  ├─ frame.rs        # wl_surface.frame 타임아웃
+│  ├─ foreign_toplevel.rs
+│  └─ niri.rs         # feature "niri"
+├─ config.rs          # 계층 병합: defaults.toml < 사용자 < 배경 < 출력 < CLI
+├─ assets.rs          # 사용자 assets 디렉터리 → 내장 순으로 파일 해석
+├─ wallpaper.rs       # 경로 → 타입 판별
+└─ ipc.rs
+```
+
+### Backend trait
+
+```rust
+trait Backend {
+    /// frame 콜백 시 호출. 그릴 게 있으면 그리고 다음 콜백이 필요한지 반환
+    fn frame(&mut self, out: &mut OutputCtx, now: Instant) -> NeedFrame;
+    fn configure(&mut self, out: &mut OutputCtx, size: PhysicalSize, scale: f64);
+    fn pause(&mut self);
+    fn resume(&mut self);
+    fn set_volume(&mut self, volume: f64, mute: bool) {}
+    fn pointer(&mut self, ev: &PointerEvent) {}
+}
+```
+
+`NeedFrame::No`(정적 이미지, 일시정지 상태)이면 frame 콜백을 요청하지 않아 **완전히 잠듭니다.**
+video는 GStreamer 채널 이벤트로 깨어나 버퍼만 attach합니다.
+
+### 입력
+- `wl_pointer` enter/motion/button/axis → 출력 기준 좌표(물리 픽셀)의 `PointerEvent`로 변환 → 해당 출력 Backend
+- 포인터가 들어오면 `wp_cursor_shape_v1`로 `cursor.shape` 설정값의 커서 지정 (없으면 xcursor 테마 폴백)
+- `interactive = false`인 배경은 `wl_surface.set_input_region`을 빈 영역으로 설정해 입력 자체를 받지 않음
+- 웹 배경은 헬퍼의 WebKit이 직접 입력을 받음
+
+### 일시정지 사유
+출력마다 사유 집합 `{User, Hidden, Covered}`을 둡니다. 하나라도 있으면 pause, 모두 사라지면 resume.
+신호원은 [protocols.md](protocols.md#가림-감지) 참고.
+
+## 웹 헬퍼
+
+- 데몬이 웹 배경을 처음 설정할 때 `waywall-web`을 실행하고, 웹 배경이 하나도 없으면 종료시킴
+- 한 프로세스가 여러 출력의 웹 배경을 담당 (GTK 앱 하나, 출력마다 창 하나)
+- 통신: 헬퍼의 stdin/stdout JSON-lines ([cli-ipc.md](cli-ipc.md#웹-헬퍼-프로토콜))
+- 해당 출력의 데몬 layer surface는 웹 배경 동안 제거하고, 헬퍼가 같은 출력에 자체 layer surface를 띄움
+- 가림 판정: frame 기아는 헬퍼가 GTK `FrameClock`으로 감지해 보고하고, toplevel/niri 판정은 데몬이 해서 내려보냄
+- 헬퍼가 비정상 종료하면 데몬이 로그를 남기고 최대 3회 재시작, 그래도 실패하면 해당 출력을 `error` 상태로 둠
+
+## 이벤트 루프와 스레드
+
+| 스레드 | 역할 |
+|---|---|
+| 메인 (calloop) | Wayland 디스패치, IPC, 타이머, Backend, wgpu 렌더 제출 |
+| GStreamer 내부 | 디코딩, 오디오 출력, appsink 콜백 → calloop 채널로 샘플 전달 |
+| 웹 헬퍼 프로세스 | 별도 프로세스 (GTK 메인 루프) |
+
+wgpu 렌더는 메인 스레드에서 제출만 하고 GPU가 비동기로 처리합니다.
+파티클 시뮬레이션은 compute 셰이더라서 CPU 비용이 거의 없습니다.
+
+## 성능 원칙과 측정
+
+- 가려졌거나 정지 중이면 **frame 콜백도 타이머도 없어야** 함 (가림 해제 감지용 콜백 하나만 대기)
+- 정적 이미지만 있으면 GPU 장치를 만들지 않음
+- 영상은 dmabuf 경로가 기본이고, 폴백 경로에 들어가면 로그로 경고
+- 측정 도구: `top`/`htop`(CPU), `nvtop`/`intel_gpu_top`/`radeontop`(GPU),
+  `powertop`(초당 깨어남 횟수), `RUST_LOG=waywall=debug`의 프레임 타이밍 로그
