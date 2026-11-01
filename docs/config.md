@@ -106,7 +106,7 @@ density = 2.0
 |---|---|---|---|
 | `volume` | int 0–100 | `50` | 전체 볼륨 |
 | `mute` | bool | `false` | 전체 음소거 |
-| `pause_when` | string | `"fullscreen"` | `never` · `fullscreen` · `maximized` · `any-window`(niri 신호원 필요) |
+| `pause_when` | string | `"fullscreen"` | `never` · `fullscreen` · `maximized` · `any-window`(`visibility.niri = true` 필요, 없으면 `maximized`처럼 동작). 그 출력에 활성화(포커스)된 전체화면/최대화 창이 있거나, any-window면 활성 워크스페이스에 창이 있을 때 멈춤 |
 
 `pause_when`과 관계없이, frame 콜백 기준으로 완전히 가려진(`Hidden`) 출력은 항상 정지합니다.
 
@@ -142,7 +142,7 @@ density = 2.0
 | `frame_timeout_ms` | int | `1500` | frame 콜백이 이 시간 이상 없으면 `Hidden` |
 | `slow_frame_count` | int | `3` | 저빈도 콜백을 보내는 컴포지터용: 간격이 임계 이상인 콜백이 이 횟수 연속이면 `Hidden` |
 | `foreign_toplevel` | bool | `true` | wlr-foreign-toplevel 신호원 사용 |
-| `niri` | bool | `false` | niri IPC 신호원 사용 (feature `niri` 빌드) |
+| `niri` | bool | `false` | niri IPC 신호원 사용. `pause_when = "any-window"`에 필요 |
 
 ### `[cursor]`
 

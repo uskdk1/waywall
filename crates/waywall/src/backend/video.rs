@@ -16,6 +16,7 @@ use gstreamer::prelude::*;
 use gstreamer_allocators as gst_alloc;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
+use smithay_client_toolkit::compositor::FrameCallbackData;
 use smithay_client_toolkit::dmabuf::DmabufState;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use wayland_client::Proxy;
@@ -486,12 +487,13 @@ impl VideoView {
             .set_position(p.position.0, p.position.1);
     }
 
-    /// 샘플 하나를 서브서피스에 붙이고 커밋한다.
+    /// 샘플 하나를 서브서피스에 붙이고 커밋한다. `request_frame`이면 가림 감시용 frame 콜백도 요청한다.
     pub fn present(
         &mut self,
         ctx: &Ctx<'_>,
         dmabuf: &DmabufState,
         sample: gst::Sample,
+        request_frame: bool,
     ) -> Result<()> {
         let caps = sample
             .caps()
@@ -512,6 +514,9 @@ impl VideoView {
         let surface = &self.plane.surface;
         surface.attach(Some(&wl), 0, 0);
         surface.damage_buffer(0, 0, size.0 as i32, size.1 as i32);
+        if request_frame {
+            surface.frame(ctx.qh, FrameCallbackData(surface.clone()));
+        }
         surface.commit();
         if self.mode == Mode::Dmabuf {
             // release까지 디코더 버퍼를 붙잡아 둔다.

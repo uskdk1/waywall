@@ -9,6 +9,7 @@ mod gpu;
 mod ipc;
 mod properties;
 mod runtime;
+mod visibility;
 mod wallpaper;
 mod wayland;
 

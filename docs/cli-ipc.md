@@ -64,7 +64,7 @@ waywall quit
 
 - 출력별 최종 설정이나 전역 설정(`[types.*]`, `[detect]` 등)이 바뀐 출력만 배경을 다시 읽습니다.
 - `[surface]`가 바뀌면 모든 layer surface를 다시 만듭니다.
-- `[log]`, `[cursor].theme`/`size`는 데몬을 다시 시작해야 반영됩니다.
+- `[log]`, `[cursor].theme`/`size`, `[visibility].foreign_toplevel`/`niri`는 데몬을 다시 시작해야 반영됩니다.
 - 응답은 다시 읽기를 시작한 즉시 돌려줍니다. 배경 로딩 결과는 `list`로 확인합니다.
 
 ### `waywall list` 출력 예

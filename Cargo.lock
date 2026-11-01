@@ -2559,6 +2559,7 @@ dependencies = [
  "wayland-client",
  "wayland-cursor",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "waywall-proto",
  "wgpu",
 ]

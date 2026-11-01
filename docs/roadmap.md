@@ -61,11 +61,18 @@ swapchain은 Bgra8Unorm(Shadertoy와 같은 색). 단위 테스트 30개.
 libav GIF 디먹서는 비flush segment seek를 처리하지 못해 GIF만 flush seek로 반복.
 **미확인:** 볼륨 크기 변화(귀로 확인 필요), 하드웨어 디코더가 없는 환경에서 dmabuf → shm 자동 폴백(초기 구현 중 협상 실패로 우연히 동작은 확인).
 
-## M5 — 가림 감지
-- frame 타임아웃 → foreign_toplevel → (feature) niri
+## M5 — 가림 감지 ✅
+- frame 타임아웃 → foreign_toplevel → niri (설정 `visibility.niri`)
 - niri의 frame 콜백 동작 측정 후 `protocols.md` 갱신
 
 **완료 기준:** 전체화면 창 진입 시 `list`에 사유 표시 + CPU/GPU 사용 0 수준, 해제 시 재개.
+
+**결과 (2026-11-01, niri 26.04):** HDMI-A-1의 창을 전체화면으로 만들자 같은 순간(같은 이벤트 디스패치) 영상이 멈추고 `list`에
+`paused … 0.0fps (covered:foreign_toplevel)`, 해제하자 즉시 재개되어 1초 뒤 60fps. `pause_when = "any-window"` + `visibility.niri = true`에서
+창이 있는 워크스페이스로 옮기면 `covered:niri`로 멈추고 빈 워크스페이스로 옮기면 재개. frame 콜백 감시(`Hidden`)·정책 판정·niri 이벤트 반영은
+단위 테스트. 
+**미확인:** niri가 전체화면 창 아래 background layer에 frame 콜백을 끊는지(`Hidden` 신호원이 실제로 켜지는 경우).
+`pause_when = "never"`로 잰 첫 측정에서는 `hidden`이 한 번도 뜨지 않았으나, 그 시간에 전체화면이 있었는지는 기록하지 못함.
 
 ## M6 — 씬 렌더러
 - M6a: 씬 로더, image 레이어, 패럴랙스, HDR 버퍼 + 톤매핑

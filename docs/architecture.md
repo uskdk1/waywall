@@ -148,7 +148,7 @@ crates/waywall/src/
 │  ├─ mod.rs          # 사유 합성
 │  ├─ frame.rs        # wl_surface.frame 타임아웃
 │  ├─ foreign_toplevel.rs
-│  └─ niri.rs         # feature "niri"
+│  └─ niri.rs         # niri IPC EventStream (설정 visibility.niri, any-window 정책)
 ├─ config.rs          # 계층 병합: defaults.toml < 배경 작성자 < 사용자 < 출력 < CLI
 ├─ config_edit.rs     # `--save`: toml_edit로 주석·서식을 보존하며 config.toml 수정
 ├─ runtime.rs         # CLI 계층: set/volume/pause 값을 출력 이름 기준으로 기억 (재연결 시 복원)

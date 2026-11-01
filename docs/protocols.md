@@ -90,15 +90,22 @@ core 프로토콜은 surface가 어떤 식으로도 보이지 않으면 서버�
 
 - 셰이더/씬은 frame 콜백으로만 그리므로, 가려지면 **렌더 루프가 자연히 멈춥니다.**
 - 영상/웹은 디코딩·오디오·JS가 계속 돌기 때문에, frame 콜백이 **안 오는 것을 감지**해서 명시적으로 pause합니다.
-- 판정: frame 콜백 요청 + 커밋 후 `visibility.frame_timeout_ms` 동안 응답이 없으면 `Hidden`.
-  콜백이 다시 오면 해제.
+  영상은 프레임을 붙일 때마다 그 서브서피스에 frame 콜백을 요청합니다(콜백으로 페이싱하지는 않고 감시에만 씀).
+- 판정 (출력마다, 재생 중일 때만):
+  - 요청한 콜백이 `visibility.frame_timeout_ms` 안에 오지 않으면 `Hidden`
+  - 콜백 간격이 `frame_timeout_ms` 이상인 것이 `visibility.slow_frame_count`회 연속이어도 `Hidden`
+    (가려진 surface에 저빈도 콜백을 보내는 컴포지터 보정)
+  - `Hidden` 동안 콜백이 오면: 직전 콜백과의 간격이 `frame_timeout_ms` 미만이면 해제, 아니면 계속 `Hidden`
 - pause 중에도 "다시 보이는지" 알기 위해 **빈 커밋 + frame 콜백 하나만** 대기시켜 둡니다.
   버퍼를 다시 그리지 않으므로 비용은 사실상 0입니다.
-- 가려진 surface에도 저빈도(예: 약 1초 간격) 콜백을 보내는 컴포지터는 "콜백 간격이 임계 이상인
-  상태가 `visibility.slow_frame_count`회 연속"이면 Hidden으로 보정합니다. niri의 실제 동작은 구현 단계에서 측정해 기록합니다.
+- 사용자 `pause`나 `Covered`로 멈춘 동안에는 콜백을 요청하지 않으므로 `Hidden` 판정도 하지 않습니다.
+  재개할 때 판정을 새로 시작합니다.
+- 셰이더는 `Hidden`이 되면 `iTime`도 멈춥니다.
 - **niri 측정 (2026-11-01, M3):** 창들이 덮고 있는 출력(창 사이 간격으로 배경이 조금 보임)의 background layer에도
   주사율대로 frame 콜백을 보냈습니다. 이 경우 1차 신호만으로는 멈추지 않으므로 `pause_when` 정책(보조 신호)이 필요합니다.
-  창이 출력 전체를 완전히 덮는 경우(전체화면)의 동작은 M5에서 측정합니다.
+  창이 출력 전체를 완전히 덮는 경우(전체화면)의 동작은 아직 확인하지 못했습니다(roadmap.md M5 참고).
+- **niri 측정 (2026-11-01, M5):** 전체화면 + 포커스 창은 wlr-foreign-toplevel `state` 이벤트로 즉시 알려져,
+  기본 정책(`fullscreen`)으로 같은 순간 정지·재개됩니다.
 
 #### 보조: `zwlr_foreign_toplevel_management_v1` (de-facto)
 "전체화면/최대화 창이 있으면 정지" 같은 **정책 기반** 판정용입니다. frame 신호만으로는
@@ -114,9 +121,16 @@ core 프로토콜은 surface가 어떤 식으로도 보이지 않으면 서버�
 대부분 걸러지지만 완벽하지 않습니다.
 
 #### 최후 수단: niri IPC (컴포지터 전용)
-`$NIRI_SOCKET`에 `EventStream`을 요청해 워크스페이스/창 상태를 직접 받습니다. 위 두 신호로 판정할 수
-없는 정책(예: `pause_when = "any-window"` — 현재 워크스페이스에 창이 하나라도 있으면 정지)에만 쓰며,
-cargo feature `niri` + 설정 `visibility.niri = true`일 때만 동작합니다.
+`$NIRI_SOCKET`에 `"EventStream"`을 요청해 워크스페이스/창 상태를 직접 받습니다. 위 두 신호로 판정할 수
+없는 정책(`pause_when = "any-window"`)에만 쓰며, 설정 `visibility.niri = true`일 때만 연결합니다.
+
+- 판정: 출력의 **활성 워크스페이스에 창이 하나라도**(플로팅 포함) 있으면 그 출력을 `Covered`(source `niri`)로 봅니다.
+- 별도 스레드가 소켓을 blocking으로 읽고(이벤트가 없으면 잠듦), 출력별 결과가 바뀔 때만 calloop 채널로 보냅니다.
+- 이벤트는 필요한 필드(`WorkspacesChanged`, `WorkspaceActivated`, `WindowsChanged`, `WindowOpenedOrChanged`,
+  `WindowClosed`)만 느슨하게 읽어 niri 버전 차이를 견딥니다. 연결이 끊기면 경고를 남기고 이 신호원을 끕니다.
+- 별도 크레이트 없이 Unix 소켓 + JSON이라 cargo feature로 나누지 않습니다.
+- `any-window`인데 `visibility.niri = false`(또는 niri가 아님)면 시작 시 경고하고 `maximized`처럼 동작합니다.
+- **측정 (2026-11-01, niri 26.04):** IPC의 창 정보에는 전체화면 여부가 없어 `fullscreen`/`maximized` 정책은 toplevel 신호원을 씁니다.
 
 #### 신호 합성 규칙
 - `Hidden` (frame) — 항상 pause 사유

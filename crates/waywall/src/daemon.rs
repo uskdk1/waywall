@@ -6,7 +6,7 @@ use std::io::Read;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::ptr::NonNull;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use calloop::channel::{Channel, Event as ChannelEvent, Sender, channel};
@@ -30,7 +30,7 @@ use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, QueueHandle};
 use waywall_proto::config::{
-    Config, Fill, FillOrPrevious, ImageOptions, LayerKind, ShaderOptions, VideoOptions,
+    Config, Fill, FillOrPrevious, ImageOptions, LayerKind, PauseWhen, ShaderOptions, VideoOptions,
 };
 use waywall_proto::ipc::{
     ListData, OutputStatus, PauseReason, PlayState, Reason, ReasonSource, Request, Response,
@@ -51,12 +51,17 @@ use crate::gpu::shadertoy::{self, Language};
 use crate::ipc::{self, Clients};
 use crate::properties;
 use crate::runtime::{self, Runtime};
+use crate::visibility;
+use crate::visibility::foreign_toplevel::Toplevels;
+use crate::visibility::frame::Change;
+use crate::visibility::niri::{self, NiriMsg};
 use crate::wallpaper::{self, Source, Wallpaper};
 use crate::wayland::dmabuf::DrmFormat;
 use crate::wayland::globals::Globals;
 use crate::wayland::output::{
     Content, Ctx, DesyncPlane, Output, Pending, Purpose, SCALE_DENOMINATOR,
 };
+use smithay_client_toolkit::compositor::FrameCallbackData;
 use smithay_client_toolkit::dmabuf::DmabufState;
 use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1;
@@ -101,6 +106,11 @@ pub struct State {
     _dmabuf_feedback: Option<ZwpLinuxDmabufFeedbackV1>,
     videos: Sender<VideoMsg>,
     next_view: u64,
+
+    pub toplevels: Toplevels,
+    /// niri IPC: 출력 → 활성 워크스페이스에 창이 있는지.
+    niri: HashMap<String, bool>,
+    niri_active: bool,
 }
 
 /// 디코딩 스레드 → 메인 루프.
@@ -199,6 +209,13 @@ pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
     // v4 기본 feedback으로 영상 버퍼 포맷을 정한다. 없으면 v3 modifier 이벤트 목록, 그것도 없으면 shm.
     let dmabuf = DmabufState::new(&globals, &qh);
     let dmabuf_feedback = dmabuf.get_default_feedback(&qh).ok();
+    let toplevels = Toplevels::bind(&globals, &qh, config.visibility.foreign_toplevel);
+    let niri_active = config.visibility.niri && start_niri(&handle);
+    if config.pause_when == PauseWhen::AnyWindow && !niri_active {
+        tracing::warn!(
+            "pause_when = \"any-window\" needs visibility.niri = true under niri; acting like \"maximized\""
+        );
+    }
     let compositor = CompositorState::bind(&globals, &qh).context("wl_compositor is required")?;
     let subcompositor = SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)
         .context("wl_subcompositor is required")?;
@@ -235,6 +252,9 @@ pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
         dmabuf_formats: Vec::new(),
         videos,
         next_view: 0,
+        toplevels,
+        niri: HashMap::new(),
+        niri_active,
     };
 
     tracing::info!(config = ?state.layers.config_path(), "waywall daemon started");
@@ -374,6 +394,7 @@ impl State {
         output.description = info.description.clone();
         output.user_paused = user_paused;
         self.outputs.push(output);
+        self.visibility_changed();
     }
 
     pub fn remove_output(&mut self, wl_output: &WlOutput) {
@@ -842,19 +863,7 @@ impl State {
             let out = &mut self.outputs[idx];
             out.user_paused = paused;
             tracing::info!(output = %out.name, paused, "user pause");
-            if let Content::Video(view) = &mut out.content {
-                view.set_paused(paused);
-            }
-            if let Some(view) = &mut out.incoming {
-                view.set_paused(paused);
-            }
-            if let Content::Shader(view) = &mut out.content {
-                view.set_paused(paused);
-                // 멈춰 있던 렌더 루프는 한 장 그려서 다시 돌린다.
-                if !paused && !view.waiting_frame && !view.timer_armed {
-                    self.draw_shader(idx);
-                }
-            }
+            self.apply_pause(idx);
         }
         Ok(Response::ok())
     }
@@ -923,8 +932,12 @@ impl State {
             return;
         };
         let out = &mut self.outputs[idx];
-        let paused = out.user_paused;
+        let paused = out.is_paused();
+        // 감시용 frame 콜백은 화면에 붙은 영상에만, 기다리는 것이 없을 때 하나씩.
+        let request_frame = !paused && !out.watch.pending();
         let incoming = out.incoming.as_ref().is_some_and(|v| v.id == msg.view);
+        let frame_requested =
+            request_frame && !incoming && matches!(msg.event, VideoEvent::Frame(_));
         let view = match (&mut out.content, &mut out.incoming) {
             (_, Some(v)) if v.id == msg.view => v,
             (Content::Video(v), _) if v.id == msg.view => v,
@@ -933,7 +946,7 @@ impl State {
         let result = match msg.event {
             VideoEvent::Frame(sample) => {
                 let ctx = ctx!(self);
-                view.present(&ctx, &self.dmabuf, sample)
+                view.present(&ctx, &self.dmabuf, sample, request_frame && !incoming)
             }
             VideoEvent::AsyncDone => view.on_async_done(paused),
             VideoEvent::SegmentDone => view.on_segment_done(),
@@ -973,6 +986,10 @@ impl State {
         if let Err(e) = result {
             self.video_failed(idx, incoming, e);
             return;
+        }
+        if frame_requested {
+            self.outputs[idx].watch.requested(Instant::now());
+            self.arm_watch(idx);
         }
         // 첫 프레임이 붙었으면 이전 화면과 바꾼다.
         let out = &mut self.outputs[idx];
@@ -1053,7 +1070,7 @@ impl State {
         let gpu = self.gpu.as_ref().context("GPU disappeared")?;
         let id = self.next_view;
         self.next_view += 1;
-        let paused = self.outputs[idx].user_paused;
+        let paused = self.outputs[idx].is_paused();
         let view = ShaderView::new(
             gpu,
             surface,
@@ -1086,9 +1103,16 @@ impl State {
         let Content::Shader(view) = &mut out.content else {
             return;
         };
-        if let Err(e) = view.draw(gpu, &self.qh) {
-            tracing::error!(output = %out.name, "{e:#}");
-            out.error = Some(format!("{e:#}"));
+        match view.draw(gpu, &self.qh) {
+            // draw는 항상 frame 콜백을 요청한다.
+            Ok(()) => {
+                out.watch.requested(Instant::now());
+                self.arm_watch(idx);
+            }
+            Err(e) => {
+                tracing::error!(output = %out.name, "{e:#}");
+                out.error = Some(format!("{e:#}"));
+            }
         }
     }
 
@@ -1111,17 +1135,32 @@ impl State {
         }
     }
 
-    /// GPU 서브서피스의 frame 콜백: fps 제한을 지키며 다음 프레임을 그린다.
+    /// 셰이더/영상 서브서피스의 frame 콜백: 가림 판정을 갱신하고, 셰이더는 fps 제한을 지키며 다음 프레임을 그린다.
     pub fn on_frame(&mut self, surface: &WlSurface) {
         let Some(idx) = self
             .outputs
             .iter()
-            .position(|o| matches!(&o.content, Content::Shader(v) if v.plane.surface == *surface))
+            .position(|o| o.live_surface() == Some(surface))
         else {
             return;
         };
+        let now = Instant::now();
+        let vis = &self.config.visibility;
+        let timeout = Duration::from_millis(vis.frame_timeout_ms);
         let out = &mut self.outputs[idx];
-        let paused = out.user_paused;
+        let change = out.watch.on_callback(now, timeout, vis.slow_frame_count);
+        if change != Change::None {
+            tracing::info!(output = %out.name, ?change, "frame callbacks");
+            self.apply_pause(idx);
+        }
+        let out = &mut self.outputs[idx];
+        if out.watch.hidden() {
+            // 아직 가려져 있다: 다시 보이는지 알기 위해 빈 커밋 + 콜백 하나만 걸어 둔다.
+            surface.frame(&self.qh, FrameCallbackData(surface.clone()));
+            surface.commit();
+            out.watch.requested(now);
+        }
+        let paused = out.is_paused();
         let Content::Shader(view) = &mut out.content else {
             return;
         };
@@ -1152,7 +1191,7 @@ impl State {
             return;
         };
         let out = &mut self.outputs[idx];
-        let paused = out.user_paused;
+        let paused = out.is_paused();
         let Content::Shader(view) = &mut out.content else {
             return;
         };
@@ -1163,6 +1202,108 @@ impl State {
         if !paused {
             self.draw_shader(idx);
         }
+    }
+
+    // ── 가림 감지 ─────────────────────────────────────────────────────────
+
+    /// 사유가 바뀌었을 수 있다: 내용의 재생 상태를 맞춘다.
+    fn apply_pause(&mut self, idx: usize) {
+        let out = &mut self.outputs[idx];
+        let paused = out.is_paused();
+        if paused == out.paused_applied {
+            return;
+        }
+        out.paused_applied = paused;
+        // 다른 사유로 멈추면 콜백을 요청하지 않으니 Hidden 판정도 처음부터 다시 한다.
+        if out.user_paused || out.covered_toplevel || out.covered_niri {
+            out.watch.reset();
+        }
+        tracing::info!(
+            output = %out.name, paused, user = out.user_paused, hidden = out.watch.hidden(),
+            covered = out.covered_toplevel || out.covered_niri, "pause state"
+        );
+        if let Content::Video(view) = &mut out.content {
+            view.set_paused(paused);
+        }
+        if let Some(view) = &mut out.incoming {
+            view.set_paused(paused);
+        }
+        if let Content::Shader(view) = &mut out.content {
+            view.set_paused(paused);
+            // 멈춰 있던 렌더 루프는 한 장 그려서 다시 돌린다.
+            if !paused && !view.waiting_frame && !view.timer_armed {
+                self.draw_shader(idx);
+            }
+        }
+    }
+
+    /// toplevel/niri 상태나 정책이 바뀌었다: 모든 출력의 Covered를 다시 계산한다.
+    pub fn visibility_changed(&mut self) {
+        let policy = visibility::effective_policy(self.config.pause_when, self.niri_active);
+        let toplevels = self.toplevel_states();
+        for idx in 0..self.outputs.len() {
+            let out = &mut self.outputs[idx];
+            out.covered_toplevel = visibility::covered_by_toplevels(policy, &out.name, &toplevels);
+            out.covered_niri = self
+                .niri
+                .get(&out.name)
+                .is_some_and(|&busy| visibility::covered_by_niri(policy, busy));
+            self.apply_pause(idx);
+        }
+    }
+
+    /// 요청한 frame 콜백이 제때 오는지 확인할 타이머.
+    fn arm_watch(&mut self, idx: usize) {
+        let timeout = Duration::from_millis(self.config.visibility.frame_timeout_ms);
+        let out = &mut self.outputs[idx];
+        if out.watch_timer {
+            return;
+        }
+        let Some(at) = out.watch.deadline(timeout) else {
+            return;
+        };
+        let id = out.id;
+        let timer = self
+            .handle
+            .insert_source(Timer::from_deadline(at), move |_, _, state| {
+                state.on_watch_timer(id);
+                TimeoutAction::Drop
+            });
+        match timer {
+            Ok(_) => out.watch_timer = true,
+            Err(e) => tracing::error!("failed to arm visibility timer: {e}"),
+        }
+    }
+
+    fn on_watch_timer(&mut self, output: u64) {
+        let Some(idx) = self.index_by_id(output) else {
+            return;
+        };
+        let timeout = Duration::from_millis(self.config.visibility.frame_timeout_ms);
+        let out = &mut self.outputs[idx];
+        out.watch_timer = false;
+        if out.watch.on_timer(Instant::now(), timeout) == Change::Hidden {
+            tracing::info!(output = %out.name, "no frame callbacks: hidden");
+            self.apply_pause(idx);
+        } else {
+            // 그 사이 새로 요청한 콜백이 있으면 그 기한으로 다시 건다.
+            self.arm_watch(idx);
+        }
+    }
+
+    fn on_niri(&mut self, msg: NiriMsg) {
+        match msg {
+            NiriMsg::Outputs(map) => {
+                tracing::debug!(?map, "niri outputs");
+                self.niri = map;
+            }
+            NiriMsg::Gone(why) => {
+                tracing::warn!("niri IPC disconnected ({why}); niri visibility source off");
+                self.niri.clear();
+                self.niri_active = false;
+            }
+        }
+        self.visibility_changed();
     }
 
     /// layer surface 기준 포인터 이벤트.
@@ -1257,10 +1398,17 @@ impl State {
         {
             tracing::warn!("[log] and [cursor].theme/size take effect after a daemon restart");
         }
+        if config.visibility.foreign_toplevel != self.config.visibility.foreign_toplevel
+            || config.visibility.niri != self.config.visibility.niri
+        {
+            tracing::warn!("[visibility].foreign_toplevel/niri take effect after a daemon restart");
+        }
         self.layers = layers;
         self.config = config;
         self.runtime.clear_settings();
         tracing::info!(config = ?self.layers.config_path(), "reloaded");
+        // pause_when이 바뀌었을 수 있다.
+        self.visibility_changed();
 
         if surface_changed {
             // layer/namespace는 surface 생성 시에만 정할 수 있다.
@@ -1300,13 +1448,20 @@ fn info(wp: &Wallpaper) -> WallpaperInfo {
 
 fn status(out: &mut Output) -> OutputStatus {
     let (width, height) = out.physical().unwrap_or_default();
-    let mut pause_reasons = Vec::new();
-    if out.user_paused {
-        pause_reasons.push(PauseReason {
-            reason: Reason::User,
-            source: ReasonSource::Cli,
-        });
-    }
+    let pause_reasons: Vec<PauseReason> = [
+        (out.user_paused, Reason::User, ReasonSource::Cli),
+        (out.watch.hidden(), Reason::Hidden, ReasonSource::Frame),
+        (
+            out.covered_toplevel,
+            Reason::Covered,
+            ReasonSource::ForeignToplevel,
+        ),
+        (out.covered_niri, Reason::Covered, ReasonSource::Niri),
+    ]
+    .into_iter()
+    .filter(|(on, ..)| *on)
+    .map(|(_, reason, source)| PauseReason { reason, source })
+    .collect();
     let state = if out.error.is_some() {
         PlayState::Error
     } else if out.cfg.wallpaper.is_none() {
@@ -1351,4 +1506,25 @@ fn layer_kind(k: LayerKind) -> Layer {
 fn is_gif(path: &std::path::Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+}
+
+/// niri IPC 신호원을 연결한다. 실패하면 경고만 남기고 `false`.
+fn start_niri(handle: &LoopHandle<'static, State>) -> bool {
+    let (tx, rx): (Sender<NiriMsg>, Channel<NiriMsg>) = channel();
+    let inserted = handle.insert_source(rx, |ev, _, state| {
+        if let ChannelEvent::Msg(msg) = ev {
+            state.on_niri(msg);
+        }
+    });
+    if let Err(e) = inserted {
+        tracing::warn!("failed to insert niri channel: {e}");
+        return false;
+    }
+    match niri::spawn(tx) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("niri visibility source unavailable: {e:#}");
+            false
+        }
+    }
 }

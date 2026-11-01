@@ -33,6 +33,7 @@ use crate::backend::video::VideoView;
 use crate::config::OutputConfig;
 use crate::daemon::State;
 use crate::fit::place;
+use crate::visibility::frame::FrameWatch;
 
 /// wp_fractional_scale_v1의 분모.
 pub const SCALE_DENOMINATOR: u32 = 120;
@@ -110,6 +111,15 @@ pub struct Output {
     pub waiters: Vec<u64>,
     /// 첫 프레임을 기다리는 영상. 첫 프레임이 오면 `content`로 바꾼다(그때까지 이전 화면 유지).
     pub incoming: Option<Box<VideoView>>,
+    /// frame 콜백 감시 (Hidden 판정).
+    pub watch: FrameWatch,
+    /// 감시 타이머가 걸려 있다.
+    pub watch_timer: bool,
+    /// 정책상 덮였다 (wlr-foreign-toplevel / niri).
+    pub covered_toplevel: bool,
+    pub covered_niri: bool,
+    /// 마지막으로 내용에 적용한 일시정지 상태.
+    pub paused_applied: bool,
     solid: Option<SolidBuffer>,
     plane: Option<Plane>,
 }
@@ -156,6 +166,11 @@ impl Output {
             user_paused: false,
             waiters: Vec::new(),
             incoming: None,
+            watch: FrameWatch::default(),
+            watch_timer: false,
+            covered_toplevel: false,
+            covered_niri: false,
+            paused_applied: false,
             solid: None,
             plane: None,
         }
@@ -187,6 +202,26 @@ impl Output {
         }
     }
 
+    /// 새 내용은 지금의 일시정지 상태로 만들어진다. frame 감시는 새 surface 기준으로 다시 시작.
+    fn content_changed(&mut self) {
+        self.watch.reset();
+        self.paused_applied = self.is_paused();
+    }
+
+    /// 사유가 하나라도 있으면 멈춤 (docs/architecture.md#일시정지-사유).
+    pub fn is_paused(&self) -> bool {
+        self.user_paused || self.watch.hidden() || self.covered_toplevel || self.covered_niri
+    }
+
+    /// 계속 갱신되는 내용(셰이더, 영상)의 서브서피스. frame 콜백 감시 대상.
+    pub fn live_surface(&self) -> Option<&WlSurface> {
+        match &self.content {
+            Content::Shader(v) => Some(&v.plane.surface),
+            Content::Video(v) => Some(&v.plane.surface),
+            _ => None,
+        }
+    }
+
     /// 기본 배경을 로딩 중인지.
     pub fn loading_main(&self) -> bool {
         self.pending.is_some_and(|p| p.purpose == Purpose::Main)
@@ -204,6 +239,7 @@ impl Output {
         self.surface().commit();
         drop((old_solid, old_plane));
         self.content = Content::Color;
+        self.content_changed();
         Ok(())
     }
 
@@ -230,6 +266,7 @@ impl Output {
             opts,
             buffer_size: (decoded.width, decoded.height),
         });
+        self.content_changed();
         Ok(())
     }
 
@@ -241,6 +278,7 @@ impl Output {
         self.surface().commit();
         drop((old_solid, old_plane));
         self.content = Content::Video(view);
+        self.content_changed();
         Ok(())
     }
 
@@ -252,6 +290,7 @@ impl Output {
         self.surface().commit();
         drop((old_solid, old_plane));
         self.content = Content::Shader(Box::new(view));
+        self.content_changed();
         Ok(())
     }
 
