@@ -62,9 +62,14 @@ swapchain은 Bgra8Unorm(Shadertoy와 같은 색). 단위 테스트 30개.
 ## M6 — 씬 렌더러
 - M6a: 씬 로더, image 레이어, 패럴랙스, HDR 버퍼 + 톤매핑
 - M6b: 파티클(compute 시뮬레이션, 이미터, 포인터 상호작용, 클릭 burst)
-- M6c: 조명(ambient/point/directional, 노멀맵), 블룸, 비네트, shader 레이어
+- M6c: 조명(ambient/point/directional, 노멀맵), 블룸, 비네트, shader 레이어 + 텍스처 입력(`inputs`: `"below"` · 레이어 · 이미지 → `iChannel0..3`).
+  셰이더 배경(단일 파일)에서도 `iChannel`을 쓸 수 있게 프리앰블 확장
+- M6d: 레이어 효과(`effects`, 내장 `sway` + 사용자 `shader` 효과, `mask`), `clip`, 포인터 따라가기(`follow`),
+  예제 씬 "햇빛 + 흔들리는 머리카락 + 커서를 따라보는 눈"
 
 **완료 기준:** 예제 씬(반딧불 숲)이 60fps, 파티클 10만 개에서도 CPU 사용 미미, 커서를 따라가는 빛 동작.
+M6c: 사진 위 햇빛 셰이더가 `"below"`의 밝은 부분에서 빛줄기를 냄. M6d: 예제 캐릭터 씬에서 머리카락만 흔들리고(마스크 밖은 고정),
+눈동자가 흰자 밖으로 나가지 않으면서 커서를 따라봄.
 
 ## M7 — 웹 헬퍼
 - `waywall-web` 크레이트, 헬퍼 프로토콜, 프로세스 수명 관리
@@ -80,6 +85,6 @@ swapchain은 Bgra8Unorm(Shadertoy와 같은 색). 단위 테스트 30개.
 - GUI 매니저(썸네일 라이브러리, 속성 편집) — IPC `subscribe` 스트림 기반
 - `ext_idle_notify_v1` 기반 유휴 정지
 - 배터리 모드(UPower D-Bus) — fps 제한/정지
-- 씬 확장: 타임라인 애니메이션, 스프라이트 시트, 오디오 반응(스펙트럼 → uniform)
+- 씬 확장: 타임라인 애니메이션, 스프라이트 시트, 메시 변형·본(퍼펫) 애니메이션(머리 기울이기 같은 큰 움직임), 오디오 반응(스펙트럼 → uniform)
 - 재생목록/시간대별 자동 변경
 - Wallpaper Engine 프로젝트 일부 가져오기(video/web 타입)

@@ -195,6 +195,8 @@ assets/
 │  ├─ vignette.wgsl
 │  ├─ lighting.wgsl         # 노멀맵 조명
 │  ├─ particles/{simulate,render}.wgsl
+│  ├─ effects/sway.wgsl     # 레이어 효과. 새 파일을 두면 새 효과 타입 (M6d)
+│  ├─ clip.wgsl             # 레이어 clip (M6d)
 │  └─ shadertoy/prelude.glsl, epilogue.glsl, prelude.wgsl   # 인터페이스 선언(uniform 블록)과 main() 래퍼
 └─ sprites/
    └─ soft-circle.wgsl      # 텍스처 없는 파티클의 기본 스프라이트 (절차적 셰이더)
@@ -257,6 +259,18 @@ radius = 300
 height = 100
 intensity = 1.0
 flicker = 0.0
+
+# 아래 두 섹션은 M6d에서 defaults.toml에 추가된다
+[types.scene.effects.sway]  # sway 효과에서 생략한 필드
+strength  = 4.0            # px
+speed     = 0.6
+scale     = 0.01
+direction = [1.0, 0.0]
+
+[types.scene.follow]        # follow에서 생략한 필드
+range     = 600.0          # px
+smoothing = 0.12           # 초
+on_leave  = "center"       # center | stay
 ```
 
 (실제 내장값의 정본은 `assets/defaults.toml`이며, 이 문서는 그 요약입니다.)

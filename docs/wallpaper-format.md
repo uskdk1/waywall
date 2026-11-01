@@ -102,7 +102,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
 - 출력 색은 Shadertoy처럼 **변환 없이** 화면에 씁니다(sRGB가 아닌 swapchain 포맷). Shadertoy에서 보던 색 그대로입니다.
 - 셰이더 안의 줄 번호는 사용자 파일 기준으로 오류에 표시됩니다.
-- 아직 지원하지 않는 것: `iChannel0..3`(텍스처·버퍼 입력), 멀티패스, 사운드 셰이더. 쓰면 컴파일 오류가 됩니다.
+- 아직 지원하지 않는 것: `iChannel0..3`(텍스처 입력 — M6c에서 추가), 멀티패스, 사운드 셰이더. 쓰면 컴파일 오류가 됩니다.
 - naga GLSL 프론트엔드가 처리하지 못하는 구문이 있으면 오류가 `waywall list`와 `set`의 응답에 표시됩니다.
   shaderc(glslang) 대체 컴파일러는 로드맵입니다.
 
@@ -248,12 +248,29 @@ vignette = 0.35
 | `opacity` | 불투명도 |
 | `parallax` | 포인터가 화면 중심에서 벗어난 만큼 반대로 이동하는 비율 |
 | `visible` | 표시 여부. `"$속성"`으로 토글 가능 |
+| `clip` | 다른 레이어 `id`. 그 레이어가 불투명한(알파 > 0) 곳에만 그림. 예: 눈동자를 흰자 안에만 |
+| `follow` | 포인터 쪽으로 제한된 거리만큼 움직임 ([포인터 따라가기](#포인터-따라가기-follow)) |
+| `effects` | 레이어에 차례로 적용할 효과 목록 ([레이어 효과](#레이어-효과-effects)) |
 
 ### 레이어 타입
 
 **image** — `texture`, `position`, `scale`(숫자 또는 `[x, y]`), `rotation`(도), `normal_map`, `lit`
 
-**shader** — `source`(GLSL/WGSL), `rect`(`[x, y, w, h]`, 기본 전체). 셰이더 배경과 같은 uniform 사용
+**shader** — `source`(GLSL/WGSL), `rect`(`[x, y, w, h]`, 기본 전체), `inputs`. 셰이더 배경과 같은 uniform 사용.
+`inputs`는 `iChannel0`~`iChannel3`에 넣을 텍스처입니다.
+
+```toml
+inputs = { iChannel0 = "below", iChannel1 = "textures/light_mask.png", iChannel2 = "trees" }
+```
+
+| 값 | 의미 |
+|---|---|
+| `"below"` | 이 레이어 아래에 지금까지 그려진 장면(HDR) |
+| 레이어 `id` | 그 레이어 하나만 그린 결과 |
+| 경로 | 이미지 파일 (배경 디렉터리 기준) |
+
+GLSL에서는 Shadertoy처럼 `texture(iChannel0, uv)`와 `iChannelResolution[n]`으로, WGSL에서는
+`textureSample(channel0, channel_sampler, uv)`로 읽습니다. 지정하지 않은 채널은 1×1 투명 텍스처입니다.
 
 **particles**
 
@@ -283,8 +300,78 @@ vignette = 0.35
 조명은 `lit = true`인 image 레이어(노멀맵이 있으면 입체감 포함)에 적용됩니다. 파티클은 `emissive`로
 스스로 빛나며 블룸으로 번집니다.
 
+### 레이어 효과 (`effects`)
+
+레이어를 그리기 전에 그 레이어의 이미지에 적용하는 셰이더입니다. 목록 순서대로 적용합니다.
+내장 효과는 `assets/shaders/effects/<type>.wgsl` 파일이며, 사용자 assets 디렉터리에 같은 이름을 두면 교체되고
+새 이름의 파일을 두면 새 효과 타입이 됩니다([config.md](config.md#assets)).
+
+```toml
+effects = [
+  { type = "sway", mask = "textures/hair_mask.png", strength = 6, speed = 0.8, scale = 0.01 },
+]
+```
+
+| 타입 | 필드 | 설명 |
+|---|---|---|
+| `sway` | `mask`, `strength`(px), `speed`, `scale`, `direction`(`[x, y]`) | 마스크의 흰 부분만 노이즈로 밀어서 바람에 흔들리게 함. 마스크가 검은 곳(뿌리 쪽)은 고정 |
+| `shader` | `source`, `inputs` | 직접 쓴 효과 셰이더. `iChannel0` = 이 레이어 이미지, 나머지는 shader 레이어의 `inputs`와 같음 |
+
+모든 효과는 `mask`(흑백 이미지, 흰색 = 효과 100%)를 받을 수 있고, 생략하면 레이어 전체에 적용합니다.
+필드를 생략하면 `defaults.toml`의 `[types.scene.effects.<type>]` 값을 씁니다.
+
+### 포인터 따라가기 (`follow`)
+
+레이어를 기준점에서 포인터 방향으로 최대 `max_offset`만큼 옮깁니다. 캐릭터의 눈동자처럼 "쳐다보는" 움직임용입니다.
+`parallax`(반대 방향, 깊이감)와 달리 포인터를 **향해** 움직이고, 거리에 상한이 있습니다.
+
+```toml
+follow = { anchor = [812, 403], max_offset = [6, 4], range = 600, smoothing = 0.12, on_leave = "center" }
+```
+
+| 필드 | 설명 |
+|---|---|
+| `anchor` | 기준점(눈 중심) 좌표. 생략하면 레이어 `position` |
+| `max_offset` | 최대 이동량 `[x, y]` (px) |
+| `range` | 포인터가 기준점에서 이 거리(px) 이상 떨어지면 최대 이동 |
+| `smoothing` | 따라가는 데 걸리는 시간 상수(초). `0`이면 즉시 |
+| `on_leave` | 포인터가 배경 밖으로 나가면 `center`(제자리로) · `stay`(마지막 위치 유지) |
+
+이동량 = `normalize(포인터 − anchor) × min(1, 거리 / range) × max_offset`. 생략한 필드는 `[types.scene.follow]` 값을 씁니다.
+
+### 예: 햇빛 + 흔들리는 머리카락 + 따라보는 눈
+
+원본 그림을 레이어로 나눈 PNG가 필요합니다(배경, 캐릭터, 흰자, 눈동자, 머리카락 마스크).
+
+```toml
+[[layer]]
+type = "image"
+id = "photo"
+texture = "textures/character.png"
+effects = [{ type = "sway", mask = "textures/hair_mask.png", strength = 5 }]
+
+[[layer]]
+type = "image"
+id = "eye_white"
+texture = "textures/eye_white.png"
+
+[[layer]]
+type = "image"
+id = "pupils"
+texture = "textures/pupils.png"
+clip = "eye_white"
+follow = { anchor = [812, 403], max_offset = [6, 4] }
+
+[[layer]]
+type = "shader"
+id = "sunlight"
+source = "sunlight.glsl"          # iChannel0의 밝은 곳에서 빛줄기를 뿜는 셰이더
+inputs = { iChannel0 = "below" }
+blend = "screen"
+```
+
 ### 상호작용 요약
-- 커서 이동: `parallax`, `light.position = "pointer"`, `particles.pointer`
+- 커서 이동: `parallax`, `follow`, `light.position = "pointer"`, `particles.pointer`
 - 클릭: `emitter.burst`, 셰이더 레이어의 `iClick`
 
 ### 성능 팁
