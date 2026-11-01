@@ -43,7 +43,7 @@ pub struct Log {
     pub level: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceConfig {
     pub layer: LayerKind,
@@ -95,7 +95,7 @@ pub struct Cursor {
     pub size: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Appearance {
     pub empty: Fill,

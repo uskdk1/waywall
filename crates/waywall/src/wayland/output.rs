@@ -24,6 +24,7 @@ use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1:
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use waywall_proto::Color;
 use waywall_proto::config::{Fit, ImageOptions};
+use waywall_proto::ipc::{RenderPath, WallpaperInfo};
 
 use super::globals::{Globals, NoEvents, PixelBuffer};
 use crate::backend::image::{Decoded, Request};
@@ -95,6 +96,15 @@ pub struct Output {
     pub pending: Option<Pending>,
     /// `appearance.loading`이 배경 경로일 때의 로딩.
     pub loading: Option<Pending>,
+    pub description: Option<String>,
+    /// 설정된 배경 (로딩 중·실패 포함).
+    pub wallpaper: Option<WallpaperInfo>,
+    /// 마지막 배경 로딩 실패.
+    pub error: Option<String>,
+    /// `pause`로 멈춤 (CLI 사유).
+    pub user_paused: bool,
+    /// 다음 배경 로딩이 끝나면 응답할 `set` 요청들.
+    pub waiters: Vec<u64>,
     solid: Option<SolidBuffer>,
     plane: Option<Plane>,
 }
@@ -135,6 +145,11 @@ impl Output {
             generation: 0,
             pending: None,
             loading: None,
+            description: None,
+            wallpaper: None,
+            error: None,
+            user_paused: false,
+            waiters: Vec::new(),
             solid: None,
             plane: None,
         }
@@ -153,6 +168,20 @@ impl Output {
         let (w, h) = self.logical?;
         let scale = |v: u32| (v * self.scale120).div_ceil(SCALE_DENOMINATOR);
         Some((scale(w), scale(h)))
+    }
+
+    /// `list`에 표시할 렌더 경로.
+    pub fn render_path(&self) -> Option<RenderPath> {
+        match self.content {
+            Content::Nothing => None,
+            Content::Color => Some(RenderPath::Solid),
+            Content::Image(_) => Some(RenderPath::Shm),
+        }
+    }
+
+    /// 기본 배경을 로딩 중인지.
+    pub fn loading_main(&self) -> bool {
+        self.pending.is_some_and(|p| p.purpose == Purpose::Main)
     }
 
     pub fn next_generation(&mut self) -> u64 {

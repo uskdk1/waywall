@@ -2,6 +2,7 @@
 
 pub mod color;
 pub mod config;
+pub mod ipc;
 pub mod project;
 
 pub use color::Color;

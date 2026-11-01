@@ -93,8 +93,8 @@ impl OutputHandler for State {
 impl LayerShellHandler for State {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
         if let Some(i) = self.outputs.iter().position(|o| &o.layer == layer) {
-            let out = self.outputs.remove(i);
-            tracing::warn!(output = %out.name, "layer surface closed by compositor");
+            tracing::warn!(output = %self.outputs[i].name, "layer surface closed by compositor");
+            self.drop_output(i);
         }
     }
 

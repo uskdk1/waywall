@@ -18,11 +18,18 @@ CPU tick 0, 자발적 문맥 전환 0회(깨어남 없음), 스레드 1개, RSS 
 niri는 `wp_single_pixel_buffer_v1`을 광고하지 않아 단색은 1×1 `wl_shm` 폴백으로 동작.
 GIF는 아직 첫 프레임만 표시(애니메이션은 M4의 영상 경로에서).
 
-## M2 — 설정 · IPC · CLI
+## M2 — 설정 · IPC · CLI ✅
 - `config.toml` 로드/병합, IPC 서버, `set` / `list` / `reload` / `quit` / `pause` / `resume`
 - 모니터 연결/분리 처리
 
 **완료 기준:** `waywall set -o <출력>`이 해당 모니터만 변경, 모니터 분리·재연결 후 설정대로 복원.
+
+**결과 (2026-11-01, niri):** `set -o eDP-1`이 그 출력만 바꾸고 표시 완료 후 응답(33 ms). 잘못된 경로·타입·출력은
+아무것도 바꾸지 않고 종료 코드 1. `niri msg output HDMI-A-1 off/on`으로 분리·재연결 시 CLI로 바꾼 배경·일시정지·볼륨까지
+복원. `--save`는 주석을 보존하며 기록, `reload`는 오류 파일이면 기존 설정 유지. 두 번째 데몬은 "already running"으로 거부,
+`quit` 후 소켓 삭제. IPC 소켓을 추가해도 유휴 8초간 CPU tick 0, 자발적 문맥 전환 0회, 스레드 1개 유지
+(RSS 19 MB 중 약 6.6 MB는 출력 2개의 이미지 shm 버퍼). 단위 테스트 22개.
+`volume`은 값만 기록하고, 실제 오디오는 M4부터 반영됩니다.
 
 ## M3 — GPU 기반 + 셰이더 + 입력
 - wgpu(Vulkan) 지연 초기화, 출력별 Surface, frame 콜백 페이싱, fps 제한, `render_scale`

@@ -16,16 +16,65 @@ waywall quit
 ```
 
 - `-o` 생략 시 모든 출력에 적용
-- `set`의 상대 경로는 CLI가 절대 경로로 바꿔서 보냄 (데몬의 작업 디렉터리와 무관하게)
+- `set`의 상대 경로는 CLI가 절대 경로로 바꿔서 보냄 (데몬의 작업 디렉터리와 무관하게).
+  현재 디렉터리 기준으로 존재하지 않는 값(URL 등)은 그대로 보냄
 - `pause`는 `User` 사유를 추가, `resume`은 `User` 사유만 제거 — 가림 때문에 멈춘 배경은
   `resume`해도 가림이 풀릴 때까지 멈춰 있음
-- 데몬이 없으면 오류 메시지와 함께 종료 코드 `2`
+- `volume`은 숫자와 `--mute`/`--unmute`를 함께 줄 수 있음 (둘 중 하나는 필수)
+- 종료 코드: `0` 성공, `1` 데몬이 요청을 거절함(오류 메시지 출력), `2` 명령줄 사용법 오류, `3` 데몬이 실행 중이 아님
+
+### 런타임 덮어쓰기
+
+`set` · `volume` · `pause`는 설정 파일 위의 "CLI 계층"에 값을 둡니다([config.md](config.md#계층과-우선순위)).
+
+- 값은 **출력 이름 기준**으로 기억합니다. 모니터를 뽑았다 다시 꽂아도 데몬이 살아 있는 동안은
+  CLI로 바꾼 배경·볼륨·일시정지 상태가 그대로 복원됩니다.
+- `-o` 없이 실행하면 "모든 출력" 값이 되고, 그 키에 대해 출력별로 지정했던 CLI 값은 지워집니다.
+  (`set -o DP-1 a.png` 후 `set b.png` → 모든 출력이 `b.png`) 나중에 연결되는 출력에도 적용됩니다.
+- `-o`로 지정한 출력이 현재 연결되어 있지 않으면 오류입니다.
+- `reload`는 배경·볼륨·음소거 CLI 값을 지우고 설정 파일대로 되돌립니다. `pause` 상태는 설정이 아니라
+  상태이므로 `reload` 후에도 유지됩니다.
+
+### `--save`
+
+데몬이 읽은 설정 파일(`daemon --config` 또는 기본 위치)을 `toml_edit`로 고칩니다. 주석과 서식은 보존하고,
+파일이 없으면 만듭니다.
+
+| 명령 | 기록 위치 |
+|---|---|
+| `set -o X --save P` | `[output."X"] wallpaper = P` |
+| `set --save P` | `[default] wallpaper = P`, 그리고 모든 `[output.*]`의 `wallpaper` 삭제 (모든 출력이 P가 되도록) |
+| `volume -o X --save …` | `[output."X"]`의 `volume` / `mute` |
+| `volume --save …` | 최상위 `volume` / `mute`, 그리고 `[default]`·`[output.*]`의 같은 키 삭제 |
+
+저장해도 CLI 계층 값은 그대로 두므로 화면은 바로 바뀌고, 다음 `reload` 이후에는 파일 값으로 같은 결과가 납니다.
+
+### `set`의 응답 시점
+
+`set`은 대상 출력에서 **새 배경이 실제로 표시된 뒤** 응답합니다.
+
+1. 먼저 모든 대상 출력에 대해 경로 해석·타입 판별·옵션 검사를 합니다. 하나라도 실패하면 아무것도 바꾸지 않고
+   `ok:false`를 돌려줍니다(이전 배경 유지).
+2. 통과하면 CLI 계층에 기록하고 로딩을 시작합니다. 디코딩처럼 나중에 실패하는 경우는 `appearance.error` 규칙대로
+   대체 화면을 띄우고, 응답은 `ok:false`와 출력별 이유입니다.
+
+### `reload`
+
+설정 파일을 다시 읽습니다. 파일에 오류가 있으면 `ok:false`를 돌려주고 기존 설정을 유지합니다.
+
+- 출력별 최종 설정이나 전역 설정(`[types.*]`, `[detect]` 등)이 바뀐 출력만 배경을 다시 읽습니다.
+- `[surface]`가 바뀌면 모든 layer surface를 다시 만듭니다.
+- `[log]`, `[cursor].theme`/`size`는 데몬을 다시 시작해야 반영됩니다.
+- 응답은 다시 읽기를 시작한 즉시 돌려줍니다. 배경 로딩 결과는 `list`로 확인합니다.
 
 ### `waywall list` 출력 예
 
+크기는 물리 픽셀, `@` 뒤는 스케일입니다.
+
 ```
-DP-1   2560x1440@1     rain.mp4   video  playing  (dmabuf)
-eDP-1  1920x1200@1.25  forest/    scene  paused   (hidden:frame)
+DP-1      2560x1440@1     rain.mp4  video  playing  vol 30        dmabuf
+eDP-1     1920x1200@1.25  forest    scene  paused   vol 50 muted  gpu    (hidden:frame, user:cli)
+HDMI-A-1  1920x1080@1     -         -      idle     vol 50        solid
 ```
 
 ## IPC
@@ -77,10 +126,13 @@ eDP-1  1920x1200@1.25  forest/    scene  paused   (hidden:frame)
 }
 ```
 
-- `state`: `playing` | `paused` | `idle`(배경 없음) | `error`
+- `state`: `playing` | `paused` | `loading` | `idle`(배경 없음) | `error`
 - `reason`: `user` | `hidden` | `covered`
 - `source`: `cli` | `frame` | `foreign_toplevel` | `niri`
-- `render_path`: `shm` | `dmabuf` | `shm-fallback` | `gpu` | `web` — 성능 문제 진단용
+- `render_path`: `solid`(단색) | `shm` | `dmabuf` | `shm-fallback` | `gpu` | `web` — 성능 문제 진단용.
+  아직 아무것도 표시하지 않았으면 `null`
+- `wallpaper`: 설정된 배경(로딩 중·실패 포함). 없으면 `null`. `width`/`height`는 물리 픽셀
+- 정적 이미지는 멈출 것이 없지만 `pause` 상태는 그대로 기록·표시합니다
 - `state = "error"`일 때 `error` 필드에 메시지 (예: 셰이더 컴파일 오류)
 
 ### 오류 처리

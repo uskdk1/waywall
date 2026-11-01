@@ -1,9 +1,15 @@
-//! 데몬: 이벤트 루프와 출력별 내용 결정.
+//! 데몬: 이벤트 루프, 출력별 내용 결정, IPC 요청 처리.
 
-use anyhow::{Context, Result, anyhow};
+use std::collections::HashMap;
+use std::io::Read;
+use std::os::unix::net::UnixListener;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, anyhow, bail};
 use calloop::channel::{Channel, Event as ChannelEvent, Sender, channel};
+use calloop::generic::Generic;
 use calloop::signals::{Signal, Signals};
-use calloop::{EventLoop, LoopSignal};
+use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction};
 use calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::output::OutputState;
@@ -14,16 +20,24 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell};
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::subcompositor::SubcompositorState;
+use toml::Table;
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, QueueHandle};
 use waywall_proto::config::{Config, Fill, FillOrPrevious, ImageOptions, LayerKind};
+use waywall_proto::ipc::{
+    ListData, OutputStatus, PauseReason, PlayState, Reason, ReasonSource, Request, Response,
+    WallpaperInfo,
+};
 use waywall_proto::project::WallpaperKind;
 
 use crate::backend::image::{self, Decoded};
-use crate::config::Layers;
-use crate::wallpaper::{self, Source};
+use crate::config::{Layers, OutputConfig};
+use crate::config_edit::{self, Target};
+use crate::ipc::{self, Clients};
+use crate::runtime::{self, Runtime};
+use crate::wallpaper::{self, Source, Wallpaper};
 use crate::wayland::globals::Globals;
 use crate::wayland::output::{Content, Ctx, Output, Pending, Purpose, SCALE_DENOMINATOR};
 
@@ -38,13 +52,22 @@ pub struct State {
     pub shm: Shm,
     pub globals: Globals,
 
+    /// `daemon --config` 값. `reload`가 같은 파일을 다시 읽는다.
+    config_arg: Option<PathBuf>,
     pub layers: Layers,
     pub config: Config,
+    runtime: Runtime,
     pub outputs: Vec<Output>,
     pub pointers: Vec<ThemedPointer>,
     next_output_id: u64,
     images: Sender<ImageDone>,
     loop_signal: LoopSignal,
+
+    clients: Clients,
+    waiters: HashMap<u64, Waiter>,
+    next_waiter: u64,
+    /// 모든 출력이 끝나서 응답할 차례인 waiter. 디스패치가 끝날 때마다 비운다.
+    finished: Vec<u64>,
 }
 
 /// 디코딩 스레드 → 메인 루프.
@@ -56,8 +79,31 @@ pub struct ImageDone {
     result: Result<Decoded>,
 }
 
-pub fn run(layers: Layers) -> Result<()> {
+/// 배경이 표시될 때까지 응답을 미루는 `set` 요청.
+struct Waiter {
+    client: u64,
+    remaining: usize,
+    errors: Vec<String>,
+}
+
+enum Handled {
+    Reply(Response),
+    /// 응답은 waiter가 끝날 때.
+    Wait,
+}
+
+/// 검사를 통과해 바로 로딩할 수 있는 배경.
+enum Prepared {
+    Image {
+        wallpaper: Wallpaper,
+        path: PathBuf,
+        opts: ImageOptions,
+    },
+}
+
+pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
     let config = layers.global()?;
+    let (listener, _socket) = ipc::bind()?;
     let conn =
         Connection::connect_to_env().context("failed to connect to the Wayland compositor")?;
     let (globals, queue) = registry_queue_init::<State>(&conn).context("wl_registry")?;
@@ -86,6 +132,8 @@ pub fn run(layers: Layers) -> Result<()> {
         })
         .map_err(|e| anyhow!("failed to insert signal source: {e}"))?;
 
+    insert_listener(&handle, listener)?;
+
     let compositor = CompositorState::bind(&globals, &qh).context("wl_compositor is required")?;
     let subcompositor = SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)
         .context("wl_subcompositor is required")?;
@@ -101,17 +149,87 @@ pub fn run(layers: Layers) -> Result<()> {
         subcompositor,
 
         qh,
+        config_arg,
         layers,
         config,
+        runtime: Runtime::default(),
         outputs: Vec::new(),
         pointers: Vec::new(),
         next_output_id: 0,
         images,
         loop_signal: event_loop.get_signal(),
+        clients: Clients::default(),
+        waiters: HashMap::new(),
+        next_waiter: 0,
+        finished: Vec::new(),
     };
 
     tracing::info!(config = ?state.layers.config_path(), "waywall daemon started");
-    event_loop.run(None, &mut state, |_| {})?;
+    event_loop.run(None, &mut state, State::flush_waiters)?;
+    Ok(())
+}
+
+fn insert_listener(handle: &LoopHandle<'static, State>, listener: UnixListener) -> Result<()> {
+    let h = handle.clone();
+    handle
+        .insert_source(
+            Generic::new(listener, Interest::READ, Mode::Level),
+            move |_, listener, state| {
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            if let Err(e) = accept(&h, state, stream) {
+                                tracing::warn!("failed to accept IPC client: {e:#}");
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) => {
+                            tracing::warn!("IPC accept failed: {e}");
+                            break;
+                        }
+                    }
+                }
+                Ok(PostAction::Continue)
+            },
+        )
+        .map_err(|e| anyhow!("failed to insert IPC listener: {e}"))?;
+    Ok(())
+}
+
+fn accept(
+    handle: &LoopHandle<'static, State>,
+    state: &mut State,
+    stream: std::os::unix::net::UnixStream,
+) -> Result<()> {
+    stream.set_nonblocking(false)?;
+    let id = state.clients.add(stream.try_clone()?);
+    tracing::debug!(client = id, "IPC client connected");
+    handle
+        .insert_source(
+            Generic::new(stream, Interest::READ, Mode::Level),
+            move |_, stream, state| {
+                let mut chunk = [0u8; ipc::READ_CHUNK];
+                let action = match (&**stream).read(&mut chunk) {
+                    Ok(0) => {
+                        state.clients.eof(id);
+                        PostAction::Remove
+                    }
+                    Ok(n) => {
+                        state.clients.feed(id, &chunk[..n]);
+                        PostAction::Continue
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => PostAction::Continue,
+                    Err(e) => {
+                        tracing::debug!(client = id, "IPC read failed: {e}");
+                        state.clients.eof(id);
+                        PostAction::Remove
+                    }
+                };
+                state.pump(id);
+                Ok(action)
+            },
+        )
+        .map_err(|e| anyhow!("failed to insert IPC client: {e}"))?;
     Ok(())
 }
 
@@ -137,6 +255,13 @@ impl State {
         self.outputs.iter().position(|o| o.surface() == surface)
     }
 
+    /// 설정 파일 + CLI 계층.
+    fn output_config(&mut self, name: &str) -> Result<OutputConfig> {
+        let mut cfg = self.layers.output(name)?;
+        self.runtime.apply(name, &mut cfg);
+        Ok(cfg)
+    }
+
     pub fn add_output(&mut self, wl_output: WlOutput) {
         let Some(info) = self.output_state.info(&wl_output) else {
             return;
@@ -145,7 +270,7 @@ impl State {
             .name
             .clone()
             .unwrap_or_else(|| format!("output-{}", info.id));
-        let cfg = match self.layers.output(&name) {
+        let cfg = match self.output_config(&name) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(output = %name, "{e:#}");
@@ -171,18 +296,24 @@ impl State {
         self.next_output_id += 1;
         let scale120 = info.scale_factor.max(1) as u32 * SCALE_DENOMINATOR;
         tracing::info!(output = %name, description = ?info.description, "output added");
-        let output = Output::new(&ctx!(self), id, wl_output, name, layer, scale120, cfg);
+        let user_paused = self.runtime.is_paused(&name);
+        let mut output = Output::new(&ctx!(self), id, wl_output, name, layer, scale120, cfg);
+        output.description = info.description.clone();
+        output.user_paused = user_paused;
         self.outputs.push(output);
     }
 
     pub fn remove_output(&mut self, wl_output: &WlOutput) {
-        self.outputs.retain(|o| {
-            let keep = &o.wl_output != wl_output;
-            if !keep {
-                tracing::info!(output = %o.name, "output removed");
-            }
-            keep
-        });
+        if let Some(idx) = self.outputs.iter().position(|o| &o.wl_output == wl_output) {
+            tracing::info!(output = %self.outputs[idx].name, "output removed");
+            self.drop_output(idx);
+        }
+    }
+
+    pub fn drop_output(&mut self, idx: usize) {
+        let name = self.outputs[idx].name.clone();
+        self.settle(idx, Err(format!("{name}: output removed")));
+        self.outputs.remove(idx);
     }
 
     pub fn configured(&mut self, idx: usize, size: (u32, u32)) {
@@ -233,11 +364,25 @@ impl State {
         }
     }
 
+    /// 설정이 바뀐 출력을 다시 그린다. configure 전이면 configure 때 그린다.
+    fn refresh(&mut self, idx: usize) {
+        if self.outputs[idx].logical.is_none() {
+            return;
+        }
+        self.show_configured(idx);
+        // 동기적으로 끝났으면(단색, 즉시 실패 등) 기다리던 요청에 바로 응답한다.
+        if !self.outputs[idx].loading_main() {
+            self.settle(idx, Ok(()));
+        }
+    }
+
     /// 설정에 따라 출력에 보일 내용을 정한다.
     fn show_configured(&mut self, idx: usize) {
+        self.outputs[idx].error = None;
         match self.outputs[idx].cfg.wallpaper.clone() {
             Some(spec) => self.load(idx, &spec, Purpose::Main),
             None => {
+                self.outputs[idx].wallpaper = None;
                 let fill = self.outputs[idx].cfg.appearance.empty.clone();
                 self.apply_fill(idx, fill, Purpose::Empty);
             }
@@ -270,27 +415,52 @@ impl State {
         }
     }
 
-    fn try_load(&mut self, idx: usize, spec: &str, purpose: Purpose) -> Result<()> {
-        let base = self.layers.base_dir();
-        let wp = wallpaper::resolve(spec, &self.config.detect, &base)?;
-        let out = &self.outputs[idx];
-        tracing::info!(output = %out.name, wallpaper = %wp.name, kind = ?wp.kind, ?purpose, "loading");
+    /// 경로 해석, 타입 판별, 옵션 검사. 출력 상태는 바꾸지 않는다.
+    fn prepare(&self, cfg: &OutputConfig, spec: &str) -> Result<Prepared> {
+        let wp = wallpaper::resolve(spec, &self.config.detect, &self.layers.base_dir())?;
         match (wp.kind, &wp.source) {
             (WallpaperKind::Image, Source::File(path)) => {
                 let opts: ImageOptions =
                     self.layers
-                        .type_options(wp.kind, wp.options.as_ref(), &out.cfg)?;
-                let request = image::Request {
+                        .type_options(wp.kind, wp.options.as_ref(), cfg)?;
+                Ok(Prepared::Image {
                     path: path.clone(),
-                    target: out.physical().context("output not configured yet")?,
-                    fit: opts.fit,
-                    downscale: opts.downscale.then_some(opts.downscale_filter),
-                };
-                self.spawn_image(idx, request, opts, purpose);
-                Ok(())
+                    wallpaper: wp,
+                    opts,
+                })
             }
             (kind, _) => Err(anyhow!("{} wallpapers are not implemented yet", kind.key())),
         }
+    }
+
+    fn try_load(&mut self, idx: usize, spec: &str, purpose: Purpose) -> Result<()> {
+        if purpose == Purpose::Main {
+            // 실패해도 `list`에 무엇을 시도했는지 보이도록 먼저 기록한다.
+            let resolved = wallpaper::resolve(spec, &self.config.detect, &self.layers.base_dir());
+            self.outputs[idx].wallpaper = Some(match resolved {
+                Ok(wp) => info(&wp),
+                Err(_) => WallpaperInfo {
+                    path: spec.to_owned(),
+                    kind: None,
+                    name: spec.to_owned(),
+                },
+            });
+        }
+        let Prepared::Image {
+            wallpaper: wp,
+            path,
+            opts,
+        } = self.prepare(&self.outputs[idx].cfg, spec)?;
+        let out = &self.outputs[idx];
+        tracing::info!(output = %out.name, wallpaper = %wp.name, kind = ?wp.kind, ?purpose, "loading");
+        let request = image::Request {
+            path,
+            target: out.physical().context("output not configured yet")?,
+            fit: opts.fit,
+            downscale: opts.downscale.then_some(opts.downscale_filter),
+        };
+        self.spawn_image(idx, request, opts, purpose);
+        Ok(())
     }
 
     fn spawn_image(
@@ -348,15 +518,15 @@ impl State {
             out.pending = None;
             out.loading = None;
         }
-        match done.result {
-            Ok(decoded) => {
-                let ctx = ctx!(self);
-                let out = &mut self.outputs[idx];
-                if let Err(e) = out.present_image(&ctx, &decoded, done.request, done.opts) {
-                    self.failed(idx, done.pending.purpose, e);
-                }
-            }
-            Err(e) => self.failed(idx, done.pending.purpose, e),
+        let purpose = done.pending.purpose;
+        let shown = done.result.and_then(|decoded| {
+            let ctx = ctx!(self);
+            self.outputs[idx].present_image(&ctx, &decoded, done.request, done.opts)
+        });
+        match shown {
+            Ok(()) if purpose == Purpose::Main => self.settle(idx, Ok(())),
+            Ok(()) => {}
+            Err(e) => self.failed(idx, purpose, e),
         }
     }
 
@@ -376,8 +546,14 @@ impl State {
 
     /// 실패 시 대체 화면: Main → appearance.error → appearance.empty → 아무것도 안 함.
     fn failed(&mut self, idx: usize, purpose: Purpose, err: anyhow::Error) {
-        let out = &self.outputs[idx];
+        let out = &mut self.outputs[idx];
         tracing::error!(output = %out.name, ?purpose, "{err:#}");
+        if purpose == Purpose::Main {
+            let msg = format!("{}: {err:#}", out.name);
+            out.error = Some(format!("{err:#}"));
+            self.settle(idx, Err(msg));
+        }
+        let out = &self.outputs[idx];
         let appearance = out.cfg.appearance.clone();
         match purpose {
             Purpose::Main => match appearance.error {
@@ -388,6 +564,298 @@ impl State {
             Purpose::Error => self.apply_fill(idx, appearance.empty, Purpose::Empty),
             Purpose::Empty | Purpose::Loading => {}
         }
+    }
+
+    // ── IPC ──────────────────────────────────────────────────────────────
+
+    /// 클라이언트 버퍼에 쌓인 요청을 순서대로 처리한다.
+    fn pump(&mut self, client: u64) {
+        while let Some(line) = self.clients.next_line(client) {
+            tracing::debug!(client, request = %line, "IPC request");
+            let handled = match serde_json::from_str::<Request>(&line) {
+                Ok(req) => self.handle(client, req),
+                Err(e) => Handled::Reply(Response::error(format!("invalid request: {e}"))),
+            };
+            match handled {
+                Handled::Reply(resp) => self.clients.reply(client, &resp),
+                Handled::Wait => {
+                    self.clients.set_busy(client, true);
+                    break;
+                }
+            }
+        }
+        self.clients.reap(client);
+    }
+
+    fn handle(&mut self, client: u64, req: Request) -> Handled {
+        let result = match req {
+            Request::Set { output, path, save } => {
+                match self.cmd_set(client, output.as_deref(), path, save) {
+                    Ok(()) => return Handled::Wait,
+                    Err(e) => Err(e),
+                }
+            }
+            Request::Pause { output } => self.cmd_pause(output.as_deref(), true),
+            Request::Resume { output } => self.cmd_pause(output.as_deref(), false),
+            Request::Volume {
+                output,
+                volume,
+                mute,
+                save,
+            } => self.cmd_volume(output.as_deref(), volume, mute, save),
+            Request::List => self.cmd_list(),
+            Request::Reload => self.cmd_reload(),
+            Request::Quit => {
+                tracing::info!("quit requested");
+                self.loop_signal.stop();
+                Ok(Response::ok())
+            }
+        };
+        Handled::Reply(result.unwrap_or_else(|e| Response::error(format!("{e:#}"))))
+    }
+
+    fn targets(&self, output: Option<&str>) -> Result<Vec<usize>> {
+        match output {
+            None => Ok((0..self.outputs.len()).collect()),
+            Some(name) => match self.outputs.iter().position(|o| o.name == name) {
+                Some(i) => Ok(vec![i]),
+                None => bail!("unknown output: {name}"),
+            },
+        }
+    }
+
+    fn save(&self, target: Target<'_>, values: &[(&str, toml_edit::Value)]) -> Result<()> {
+        let path = self
+            .layers
+            .config_path()
+            .context("no config file location (set XDG_CONFIG_HOME or HOME, or use --config)")?;
+        config_edit::save(path, target, values)?;
+        tracing::info!(path = %path.display(), "config saved");
+        Ok(())
+    }
+
+    fn cmd_set(
+        &mut self,
+        client: u64,
+        output: Option<&str>,
+        path: String,
+        save: bool,
+    ) -> Result<()> {
+        let targets = self.targets(output)?;
+        // 하나라도 안 되면 아무것도 바꾸지 않는다.
+        for &idx in &targets {
+            let out = &self.outputs[idx];
+            self.prepare(&out.cfg, &path)
+                .with_context(|| out.name.clone())?;
+        }
+        if save {
+            let target = output.map_or(Target::Default, Target::Output);
+            self.save(target, &[("wallpaper", path.as_str().into())])?;
+        }
+        self.runtime.set(output, runtime::wallpaper, path);
+
+        let waiter = self.next_waiter;
+        self.next_waiter += 1;
+        self.waiters.insert(
+            waiter,
+            Waiter {
+                client,
+                remaining: targets.len(),
+                errors: Vec::new(),
+            },
+        );
+        if targets.is_empty() {
+            self.finished.push(waiter);
+        }
+        for idx in targets {
+            let name = self.outputs[idx].name.clone();
+            self.outputs[idx].cfg = self.output_config(&name)?;
+            self.outputs[idx].waiters.push(waiter);
+            self.refresh(idx);
+        }
+        Ok(())
+    }
+
+    /// 출력의 배경 로딩이 끝났다: 기다리던 요청에 결과를 알린다.
+    fn settle(&mut self, idx: usize, result: Result<(), String>) {
+        for id in std::mem::take(&mut self.outputs[idx].waiters) {
+            let Some(w) = self.waiters.get_mut(&id) else {
+                continue;
+            };
+            if let Err(e) = &result {
+                w.errors.push(e.clone());
+            }
+            w.remaining -= 1;
+            if w.remaining == 0 {
+                self.finished.push(id);
+            }
+        }
+    }
+
+    /// 디스패치마다 호출: 끝난 `set`에 응답하고, 그 클라이언트의 다음 요청을 처리한다.
+    fn flush_waiters(&mut self) {
+        while let Some(id) = self.finished.pop() {
+            let Some(w) = self.waiters.remove(&id) else {
+                continue;
+            };
+            let resp = if w.errors.is_empty() {
+                Response::ok()
+            } else {
+                Response::error(w.errors.join("; "))
+            };
+            self.clients.reply(w.client, &resp);
+            self.clients.set_busy(w.client, false);
+            self.pump(w.client);
+        }
+    }
+
+    fn cmd_pause(&mut self, output: Option<&str>, paused: bool) -> Result<Response> {
+        let targets = self.targets(output)?;
+        self.runtime.set(output, runtime::paused, paused);
+        for idx in targets {
+            let out = &mut self.outputs[idx];
+            out.user_paused = paused;
+            tracing::info!(output = %out.name, paused, "user pause");
+        }
+        Ok(Response::ok())
+    }
+
+    fn cmd_volume(
+        &mut self,
+        output: Option<&str>,
+        volume: Option<u8>,
+        mute: Option<bool>,
+        save: bool,
+    ) -> Result<Response> {
+        if volume.is_none() && mute.is_none() {
+            bail!("nothing to change: give a volume and/or mute");
+        }
+        if let Some(v) = volume
+            && v > 100
+        {
+            bail!("volume must be 0-100, got {v}");
+        }
+        let targets = self.targets(output)?;
+        if save {
+            let mut values: Vec<(&str, toml_edit::Value)> = Vec::new();
+            if let Some(v) = volume {
+                values.push(("volume", i64::from(v).into()));
+            }
+            if let Some(m) = mute {
+                values.push(("mute", m.into()));
+            }
+            let target = output.map_or(Target::TopLevel, Target::Output);
+            self.save(target, &values)?;
+        }
+        if let Some(v) = volume {
+            self.runtime.set(output, runtime::volume, v);
+        }
+        if let Some(m) = mute {
+            self.runtime.set(output, runtime::mute, m);
+        }
+        for idx in targets {
+            let name = self.outputs[idx].name.clone();
+            let cfg = self.output_config(&name)?;
+            let out = &mut self.outputs[idx];
+            out.cfg.volume = cfg.volume;
+            out.cfg.mute = cfg.mute;
+            tracing::info!(output = %name, volume = cfg.volume, mute = cfg.mute, "volume");
+        }
+        Ok(Response::ok())
+    }
+
+    fn cmd_list(&self) -> Result<Response> {
+        let outputs = self.outputs.iter().map(status).collect();
+        Ok(Response::data(serde_json::to_value(ListData { outputs })?))
+    }
+
+    fn cmd_reload(&mut self) -> Result<Response> {
+        let layers = Layers::load(self.config_arg.as_deref())?;
+        let config = layers.global()?;
+        let content_changed = Table::try_from(&config.detect)?
+            != Table::try_from(&self.config.detect)?
+            || Table::try_from(&config.types)? != Table::try_from(&self.config.types)?;
+        let surface_changed = config.surface != self.config.surface;
+        if config.log.level != self.config.log.level
+            || config.cursor.theme != self.config.cursor.theme
+            || config.cursor.size != self.config.cursor.size
+        {
+            tracing::warn!("[log] and [cursor].theme/size take effect after a daemon restart");
+        }
+        self.layers = layers;
+        self.config = config;
+        self.runtime.clear_settings();
+        tracing::info!(config = ?self.layers.config_path(), "reloaded");
+
+        if surface_changed {
+            // layer/namespace는 surface 생성 시에만 정할 수 있다.
+            let wl_outputs: Vec<WlOutput> =
+                self.outputs.iter().map(|o| o.wl_output.clone()).collect();
+            while !self.outputs.is_empty() {
+                self.drop_output(0);
+            }
+            for o in wl_outputs {
+                self.add_output(o);
+            }
+            return Ok(Response::ok());
+        }
+        for idx in 0..self.outputs.len() {
+            let name = self.outputs[idx].name.clone();
+            let cfg = self.output_config(&name)?;
+            let changed = content_changed || cfg != self.outputs[idx].cfg;
+            self.outputs[idx].cfg = cfg;
+            if changed {
+                self.refresh(idx);
+            }
+        }
+        Ok(Response::ok())
+    }
+}
+
+fn info(wp: &Wallpaper) -> WallpaperInfo {
+    WallpaperInfo {
+        path: match &wp.source {
+            Source::File(p) => p.display().to_string(),
+            Source::Url(u) => u.clone(),
+        },
+        kind: Some(wp.kind),
+        name: wp.name.clone(),
+    }
+}
+
+fn status(out: &Output) -> OutputStatus {
+    let (width, height) = out.physical().unwrap_or_default();
+    let mut pause_reasons = Vec::new();
+    if out.user_paused {
+        pause_reasons.push(PauseReason {
+            reason: Reason::User,
+            source: ReasonSource::Cli,
+        });
+    }
+    let state = if out.error.is_some() {
+        PlayState::Error
+    } else if out.cfg.wallpaper.is_none() {
+        PlayState::Idle
+    } else if out.loading_main() {
+        PlayState::Loading
+    } else if !pause_reasons.is_empty() {
+        PlayState::Paused
+    } else {
+        PlayState::Playing
+    };
+    OutputStatus {
+        name: out.name.clone(),
+        description: out.description.clone(),
+        width,
+        height,
+        scale: out.scale120 as f64 / SCALE_DENOMINATOR as f64,
+        wallpaper: out.wallpaper.clone(),
+        render_path: out.render_path(),
+        volume: out.cfg.volume,
+        mute: out.cfg.mute,
+        state,
+        pause_reasons,
+        error: out.error.clone(),
     }
 }
 

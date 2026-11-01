@@ -47,7 +47,8 @@ assets/defaults.toml (내장)
 | 내장 기본값 | 바이너리에 내장 (`assets/defaults.toml`) | — |
 
 `waywall reload`로 데몬을 재시작하지 않고 다시 읽습니다. `waywall set --save`는 해당 출력 항목을
-갱신합니다(주석과 서식 보존, `toml_edit` 사용).
+갱신합니다(주석과 서식 보존, `toml_edit` 사용). 반영 범위와 예외(`[log]`, `[cursor].theme`/`size`는 재시작 필요)는
+[cli-ipc.md](cli-ipc.md#reload)를 보세요.
 
 ## 예시 (사용자 config.toml)
 

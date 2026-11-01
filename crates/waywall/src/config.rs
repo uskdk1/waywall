@@ -43,7 +43,7 @@ pub struct Layers {
 }
 
 /// 출력 하나에 적용되는 값.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OutputConfig {
     pub wallpaper: Option<String>,
     pub volume: u8,
