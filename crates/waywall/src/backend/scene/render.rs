@@ -393,40 +393,14 @@ impl SceneRenderer {
             }
         }
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("waywall scene layers"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            if let Some((x, y, w, h)) = map.scissor() {
-                pass.set_scissor_rect(x, y, w, h);
-                for l in &self.layers {
-                    match l {
-                        DrawLayer::Image(l) => {
-                            let Some(pipeline) = &self.pipelines[blend_index(l.blend)] else {
-                                continue;
-                            };
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(0, &l.bind_group, &[]);
-                            pass.draw(0..4, 0..1);
-                        }
-                        DrawLayer::Particles(p) => p.draw(&mut pass),
-                    }
-                }
-            }
-        }
+        draw_layers(
+            &self.pipelines,
+            &self.layers,
+            encoder,
+            &self.target.view,
+            wgpu::LoadOp::Clear(self.clear),
+            map,
+        );
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("waywall scene post"),
@@ -637,6 +611,50 @@ impl HdrTarget {
             }
         })
         .context("failed to create the HDR buffer")
+    }
+}
+
+/// `layers`를 `view`에 차례로 그리는 렌더 패스 하나. contain이면 설계 영역만(scissor).
+fn draw_layers(
+    pipelines: &[Option<wgpu::RenderPipeline>; BLENDS.len()],
+    layers: &[DrawLayer],
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+    map: FitMap,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("waywall scene layers"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    let Some((x, y, w, h)) = map.scissor() else {
+        return;
+    };
+    pass.set_scissor_rect(x, y, w, h);
+    for l in layers {
+        match l {
+            DrawLayer::Image(l) => {
+                let Some(pipeline) = &pipelines[blend_index(l.blend)] else {
+                    continue;
+                };
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &l.bind_group, &[]);
+                pass.draw(0..4, 0..1);
+            }
+            DrawLayer::Particles(p) => p.draw(&mut pass),
+        }
     }
 }
 

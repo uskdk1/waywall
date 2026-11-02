@@ -119,6 +119,7 @@ CPU는 프레임 수에 비례하고 파티클 수와 무관). burst 전용 씬�
 - 문서 갱신, systemd user 서비스 예제, niri `spawn-at-startup` 예제
 
 ## 이후
+- 씬 정지 레이어 캐시: 구현·측정했으나 Iris Xe에서 이득이 없어 보류. 설계·측정·되살릴 조건·주의점은 [architecture.md](architecture.md#보류한-최적화-정지-레이어-캐시)
 - GUI 매니저(썸네일 라이브러리, 속성 편집) — IPC `subscribe` 스트림 기반
 - `ext_idle_notify_v1` 기반 유휴 정지
 - 배터리 모드(UPower D-Bus) — fps 제한/정지
