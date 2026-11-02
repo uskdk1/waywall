@@ -3,7 +3,10 @@
 //! `load`가 `scene.toml`을 검사하고 텍스처를 디코딩해 `SceneSpec`을 만들고(GPU 불필요),
 //! `render`가 출력마다 GPU 자원을 만들어 그린다. 파티클의 GPU 쪽은 `particles`.
 
+use std::collections::HashMap;
+
 mod bloom;
+mod effects;
 mod load;
 mod particles;
 mod render;
@@ -13,11 +16,12 @@ pub use load::load;
 pub use render::{SceneRenderer, upload_texture};
 use waywall_proto::Color;
 use waywall_proto::config::{
-    Blend, Bloom, ChannelDefaults, EmitterShape, Fit, ParticlePointer, Turbulence, VelocityRange,
+    Blend, Bloom, ChannelDefaults, EmitterShape, Fit, OnLeave, ParticlePointer, Turbulence,
+    VelocityRange,
 };
 
 use crate::backend::shader::CHANNELS;
-use crate::gpu::shadertoy::{Compiled, Language};
+use crate::gpu::shadertoy::{Compiled, Language, UniformLayout};
 use crate::properties::Property;
 
 /// 검사를 마친 씬. 출력 하나의 `SceneRenderer`가 소비한다.
@@ -43,10 +47,12 @@ pub struct SceneSpec {
     pub simulate_shader: naga::Module,
     /// shader 레이어 채널 입력 잘라 내기 (`scene/input.wgsl`).
     pub input_shader: naga::Module,
+    /// shader 효과 결과를 마스크로 섞는 패스 (`scene/effect_mask.wgsl`). shader 효과가 있을 때만.
+    pub effect_mask_shader: Option<naga::Module>,
 }
 
 pub enum Layer {
-    Image(ImageLayer),
+    Image(Box<ImageLayer>),
     Particles(Box<ParticleLayer>),
     Shader(Box<ShaderLayer>),
 }
@@ -83,6 +89,10 @@ pub struct ImageLayer {
     pub lit: bool,
     /// 값 그대로의 RGBA8 (OpenGL 규약 탄젠트 공간 노멀).
     pub normal_map: Option<Texture>,
+    /// `layers`의 인덱스 (이 레이어보다 아래).
+    pub clip: Option<usize>,
+    pub follow: Option<Follow>,
+    pub effects: Vec<EffectSpec>,
 }
 
 /// 필드 설명은 docs/wallpaper-format.md#레이어-타입 (particles).
@@ -130,8 +140,45 @@ pub struct ShaderLayer {
     pub sampling: [ChannelDefaults; CHANNELS],
     /// 그리는 해상도 배율.
     pub render_scale: f64,
+    pub clip: Option<usize>,
+    pub follow: Option<Follow>,
     /// HDR 버퍼에 직접 그린다: `opacity = 1`, `render_scale = 1`이고 다른 레이어의 입력이 아님 (docs/architecture.md#씬-렌더러).
     pub direct: bool,
+}
+
+/// docs/wallpaper-format.md#포인터-따라가기-follow. 좌표는 설계 px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Follow {
+    pub anchor: [f64; 2],
+    pub max_offset: [f64; 2],
+    pub range: f64,
+    pub smoothing: f64,
+    pub on_leave: OnLeave,
+}
+
+/// docs/wallpaper-format.md#레이어-효과-effects.
+pub struct EffectSpec {
+    pub kind: EffectKind,
+    /// 값 그대로의 RGBA8 (R = 효과 세기).
+    pub mask: Option<Texture>,
+}
+
+pub enum EffectKind {
+    /// `assets/shaders/effects/<name>.wgsl`. uniform 멤버를 `values`(이름 → 성분)로 채운다.
+    Builtin {
+        name: String,
+        module: naga::Module,
+        layout: UniformLayout,
+        values: HashMap<String, Vec<f32>>,
+    },
+    /// Shadertoy 형식. `channels[0]`은 비어 있고 효과를 적용할 이미지가 들어간다.
+    Shader {
+        compiled: Compiled,
+        props: Vec<Property>,
+        lang: Language,
+        channels: [Option<Texture>; CHANNELS],
+        sampling: [ChannelDefaults; CHANNELS],
+    },
 }
 
 /// 색은 선형 RGB × intensity. 좌표는 설계 px (docs/wallpaper-format.md#조명).

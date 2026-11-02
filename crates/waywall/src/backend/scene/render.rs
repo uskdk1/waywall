@@ -6,18 +6,21 @@ use anyhow::{Context, Result, ensure};
 use waywall_proto::config::{Blend, Fit, HdrFormat, Render};
 
 use super::bloom::{BloomChain, BloomPipelines};
+use super::effects::{EffectShared, GpuEffects};
 use super::particles::{self, GpuParticles};
 use super::shader_layer::{Cropper, GpuShaderLayer, Sources, Target};
-use super::{ImageLayer, Layer, Light, SceneSpec, Texture};
+use super::{Follow, ImageLayer, Layer, Light, SceneSpec, Texture};
 use crate::backend::shader::empty_texture;
 use crate::backend::view::FrameInfo;
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
+use waywall_proto::config::OnLeave;
 
 /// `scene/image.wgsl`, `scene/post.wgsl`의 엔트리 (인터페이스).
 const VS_ENTRY: &str = "vs_main";
 const FS_ENTRY: &str = "fs_main";
-/// image.wgsl의 `Layer` uniform: axis_u, axis_v, origin, opacity, lit, design_origin, design_u, design_v, rotation (f32 16개).
-const LAYER_FLOATS: usize = 16;
+/// image.wgsl의 `Layer` uniform: axis_u, axis_v, origin, opacity, lit, design_origin, design_u, design_v, rotation,
+/// clip, 패딩 (f32 20개).
+const LAYER_FLOATS: usize = 20;
 /// image.wgsl `Lights`: ambient(f32 4개) 뒤에 광원마다 color, kind, geom (f32 8개).
 const LIGHTS_HEADER_FLOATS: usize = 4;
 const LIGHT_FLOATS: usize = 8;
@@ -46,7 +49,10 @@ pub struct SceneRenderer {
     /// shader 레이어 입력으로 쓰이는 레이어를 단독으로 그린 결과 (HDR 버퍼 크기·포맷).
     isolated: HashMap<usize, Target>,
     /// shader 레이어가 있을 때만.
-    cropper: Option<Cropper>,
+    cropper: Cropper,
+    effects: EffectShared,
+    no_clip: wgpu::TextureView,
+    _no_clip: wgpu::Texture,
     layer_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     flat_normal: wgpu::TextureView,
@@ -67,8 +73,8 @@ pub struct SceneRenderer {
 }
 
 enum DrawLayer {
-    Image(GpuLayer),
-    Particles(GpuParticles),
+    Image(Box<GpuLayer>),
+    Particles(Box<GpuParticles>),
     Shader(Box<GpuShaderLayer>),
 }
 
@@ -96,9 +102,59 @@ pub(super) struct GpuLayer {
     /// 마지막으로 쓴 uniform. 같으면 다시 쓰지 않는다.
     written: Option<[f32; LAYER_FLOATS]>,
     lit: bool,
+    /// clip 대상 (`layers`의 인덱스). 그 레이어의 단독 결과 알파를 곱한다.
+    pub(super) clip: Option<usize>,
+    pub(super) follow: Option<FollowState>,
+    /// 묶은 텍스처 (clip 대상이 크기 변경으로 바뀌면 다시 묶는다).
+    views: Option<(wgpu::TextureView, Option<wgpu::TextureView>)>,
+    /// image 레이어 효과. 사각형은 그 결과를 읽는다.
+    effects: Option<Box<GpuEffects>>,
     /// image 레이어가 가진 텍스처 (shader 레이어는 결과 텍스처를 따로 가진다).
     _texture: Option<wgpu::Texture>,
     _normal: Option<wgpu::Texture>,
+}
+
+/// `follow` 상태: 패럴랙스와 같은 지수 추적.
+pub(super) struct FollowState {
+    spec: Follow,
+    smooth: Parallax,
+    /// 마지막 목표 (`on_leave = "stay"`).
+    goal: [f64; 2],
+}
+
+impl FollowState {
+    pub(super) fn new(spec: Follow) -> Self {
+        Self {
+            spec,
+            smooth: Parallax::default(),
+            goal: [0.0; 2],
+        }
+    }
+
+    /// `pointer`: 설계 px (배경 밖이면 `None`), `shift`: 이 레이어의 패럴랙스 이동. 아직 움직이면 `true`.
+    fn step(&mut self, pointer: Option<[f64; 2]>, shift: [f64; 2], dt: f64, settle: f64) -> bool {
+        let s = &self.spec;
+        self.goal = match pointer {
+            Some(p) => {
+                let d = [
+                    p[0] - (s.anchor[0] + shift[0]),
+                    p[1] - (s.anchor[1] + shift[1]),
+                ];
+                let dist = d[0].hypot(d[1]);
+                if dist > 0.0 {
+                    let k = (dist / s.range).min(1.0) / dist;
+                    [d[0] * k * s.max_offset[0], d[1] * k * s.max_offset[1]]
+                } else {
+                    [0.0; 2]
+                }
+            }
+            None => match s.on_leave {
+                OnLeave::Center => [0.0; 2],
+                OnLeave::Stay => self.goal,
+            },
+        };
+        self.smooth.step(self.goal, dt, s.smoothing, settle)
+    }
 }
 
 struct HdrTarget {
@@ -150,12 +206,26 @@ impl SceneRenderer {
                 particles::check_limits(gpu, p)?;
             }
         }
-        let input = spec
-            .layers
-            .iter()
-            .any(|l| matches!(l, Layer::Shader(_)))
-            .then(|| gpu.create_module("scene/input.wgsl", spec.input_shader))
+        let clipped = spec.layers.iter().any(|l| match l {
+            Layer::Image(i) => i.clip.is_some(),
+            Layer::Shader(s) => s.clip.is_some(),
+            Layer::Particles(_) => false,
+        });
+        ensure!(
+            !clipped
+                || hdr_format.has_color_aspect()
+                    && hdr_format != wgpu::TextureFormat::Rg11b10Ufloat,
+            "`clip` needs an HDR format with alpha (render.hdr_format = rgba16float or rgba32float)"
+        );
+        let input = gpu.create_module("scene/input.wgsl", spec.input_shader)?;
+        let effect_mask = spec
+            .effect_mask_shader
+            .map(|m| gpu.create_module("scene/effect_mask.wgsl", m))
             .transpose()?;
+        let no_clip_texture = gpu.scoped(|d| {
+            upload_texture(gpu, d, "waywall no clip", &empty_texture(), TEXTURE_FORMAT)
+        })?;
+        let no_clip = no_clip_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let simulate = spec
             .layers
             .iter()
@@ -239,6 +309,7 @@ impl SceneRenderer {
                             },
                             count: None,
                         },
+                        texture_entry(5, false),
                     ],
                 });
                 let post_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -340,30 +411,34 @@ impl SceneRenderer {
                     sampler: &sampler,
                     flat_normal: &flat_normal,
                     lights: &lights_buffer,
+                    no_clip: &no_clip,
                 };
+                let cropper = Cropper::new(gpu, d, &input);
+                let effects = EffectShared::new(gpu, d, effect_mask.as_ref());
                 let layers: Result<Vec<DrawLayer>> = spec
                     .layers
                     .into_iter()
                     .map(|l| {
                         Ok(match l {
-                            Layer::Image(l) => {
-                                DrawLayer::Image(upload_layer(gpu, d, &bindings, &l))
+                            Layer::Image(l) => DrawLayer::Image(Box::new(upload_layer(
+                                gpu, d, &bindings, *l, &effects, &cropper,
+                            )?)),
+                            Layer::Particles(p) => {
+                                DrawLayer::Particles(Box::new(GpuParticles::new(
+                                    gpu,
+                                    d,
+                                    p,
+                                    simulate.as_ref().context("simulate shader")?,
+                                    hdr_format,
+                                    &sampler,
+                                )?))
                             }
-                            Layer::Particles(p) => DrawLayer::Particles(GpuParticles::new(
-                                gpu,
-                                d,
-                                p,
-                                simulate.as_ref().context("simulate shader")?,
-                                hdr_format,
-                                &sampler,
-                            )?),
                             Layer::Shader(s) => DrawLayer::Shader(Box::new(GpuShaderLayer::new(
                                 gpu, d, s, hdr_format,
                             )?)),
                         })
                     })
                     .collect();
-                let cropper = input.as_ref().map(|m| Cropper::new(gpu, d, m));
                 (
                     pipelines,
                     post_pipeline,
@@ -372,10 +447,20 @@ impl SceneRenderer {
                     layer_layout,
                     sampler,
                     cropper,
+                    effects,
                 )
             })
             .with_context(|| format!("{name}: failed to create the scene pipelines"))?;
-        let (pipelines, post_pipeline, post_layout, layers, layer_layout, sampler, cropper) = built;
+        let (
+            pipelines,
+            post_pipeline,
+            post_layout,
+            layers,
+            layer_layout,
+            sampler,
+            cropper,
+            effects,
+        ) = built;
         let layers =
             layers.with_context(|| format!("{name}: failed to create the scene layers"))?;
 
@@ -449,6 +534,9 @@ impl SceneRenderer {
             drawn: spec.drawn,
             isolated: HashMap::new(),
             cropper,
+            effects,
+            no_clip,
+            _no_clip: no_clip_texture,
             layer_layout,
             sampler,
             flat_normal,
@@ -469,16 +557,30 @@ impl SceneRenderer {
     }
 
     /// 출력 크기에 따르는 자원: shader 레이어의 결과·입력 텍스처, 레이어 단독 결과.
-    fn size_resources(&mut self, gpu: &Gpu) -> Result<()> {
-        let map = FitMap::new(self.fit, self.size, self.target.size);
-        let wanted: Vec<usize> = self
+    /// clip 대상 (`layers`의 인덱스, 오름차순, 중복 없음).
+    fn clip_targets(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = self
             .layers
             .iter()
-            .flat_map(|l| match l {
-                DrawLayer::Shader(s) => s.layer_inputs().collect(),
-                _ => Vec::new(),
+            .filter_map(|l| match l {
+                DrawLayer::Image(l) => l.clip,
+                DrawLayer::Shader(s) => s.quad.clip,
+                DrawLayer::Particles(_) => None,
             })
             .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn size_resources(&mut self, gpu: &Gpu) -> Result<()> {
+        let map = FitMap::new(self.fit, self.size, self.target.size);
+        let mut wanted = self.clip_targets();
+        for l in &self.layers {
+            if let DrawLayer::Shader(s) = l {
+                wanted.extend(s.layer_inputs());
+            }
+        }
         self.isolated = gpu
             .scoped(|d| {
                 wanted
@@ -495,16 +597,24 @@ impl SceneRenderer {
             sampler: &self.sampler,
             flat_normal: &self.flat_normal,
             lights: &self.lights_buffer,
+            no_clip: &self.no_clip,
         };
         let sources = Sources {
             below: &self.target.view,
             isolated: &self.isolated,
-            cropper: self.cropper.as_ref(),
+            cropper: Some(&self.cropper),
         };
-        gpu.scoped(|_| {
+        gpu.scoped(|d| {
             for l in &mut self.layers {
-                if let DrawLayer::Shader(s) = l {
-                    s.resize(gpu, map, &bindings, &sources);
+                match l {
+                    DrawLayer::Shader(s) => s.resize(gpu, map, &bindings, &sources),
+                    DrawLayer::Image(l) => {
+                        if let Some(j) = l.clip {
+                            let clip = sources.isolated.get(&j).map(|t| &t.view);
+                            l.rebind(d, &bindings, clip);
+                        }
+                    }
+                    DrawLayer::Particles(_) => {}
                 }
             }
         })
@@ -514,6 +624,11 @@ impl SceneRenderer {
     /// 포인터가 움직이면 화면이 바뀔 수 있는지 (패럴랙스, 파티클 `pointer`).
     pub fn follows_pointer(&self) -> bool {
         self.max_parallax > 0.0
+            || self.layers.iter().any(|l| match l {
+                DrawLayer::Image(l) => l.follow.is_some(),
+                DrawLayer::Shader(s) => s.quad.follow.is_some(),
+                DrawLayer::Particles(_) => false,
+            })
             || (self.lit
                 && self
                     .lights
@@ -592,10 +707,31 @@ impl SceneRenderer {
         }
 
         let shift = self.parallax.shift;
+        // follow: 포인터(설계 px)를 향해. 정착 허용 오차는 패럴랙스와 같은 출력 px.
+        let p = f.pointer;
+        let pointer = p.inside.then(|| {
+            map.to_design([
+                f64::from(p.pos[0]),
+                f64::from(f.size.1) - f64::from(p.pos[1]),
+            ])
+        });
+        let settle = self.settle_px / map.scale[0].max(map.scale[1]);
+        let dt = f64::from(f.time_delta);
+        let follow = |q: &mut GpuLayer| {
+            let layer_shift = [shift[0] * q.parallax, shift[1] * q.parallax];
+            q.follow
+                .as_mut()
+                .is_some_and(|s| s.step(pointer, layer_shift, dt, settle))
+        };
         for l in &mut self.layers {
             match l {
-                DrawLayer::Image(l) => l.write_uniform(gpu, &map, shift),
+                DrawLayer::Image(l) => {
+                    moving |= follow(l);
+                    moving |= l.effects.is_some();
+                    l.write_uniform(gpu, &map, shift);
+                }
                 DrawLayer::Shader(s) => {
+                    follow(&mut s.quad);
                     s.quad.write_uniform(gpu, &map, shift);
                     // 셰이더는 시간에 따라 변한다.
                     moving = true;
@@ -613,6 +749,29 @@ impl SceneRenderer {
                 if let DrawLayer::Particles(p) = l {
                     p.simulate(&mut pass);
                 }
+            }
+        }
+
+        // 효과: 레이어 이미지 → 효과 결과 (레이어 사각형과 clip 대상 단독 그리기가 읽음).
+        for l in &self.layers {
+            if let DrawLayer::Image(l) = l
+                && let Some(e) = &l.effects
+            {
+                e.render(gpu, encoder, &self.effects, Some(&self.cropper), f);
+            }
+        }
+        // clip 대상을 단독으로. 아래 레이어부터라 clip 대상이 clip을 가져도 이미 준비되어 있다.
+        for j in self.clip_targets() {
+            if let Some(t) = self.isolated.get(&j) {
+                let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
+                draw_layers(
+                    &self.pipelines,
+                    [&self.layers[j]],
+                    encoder,
+                    &t.view,
+                    clear,
+                    map,
+                );
             }
         }
 
@@ -637,9 +796,10 @@ impl SceneRenderer {
         let mut start = 0;
         let mut load = wgpu::LoadOp::Clear(self.clear);
         for (k, l) in self.layers.iter().enumerate() {
-            let (DrawLayer::Shader(s), Some(cropper)) = (l, &self.cropper) else {
+            let DrawLayer::Shader(s) = l else {
                 continue;
             };
+            let cropper = &self.cropper;
             if s.needs_below() || s.direct() {
                 flush(encoder, start..k, load);
                 load = wgpu::LoadOp::Load;
@@ -713,6 +873,8 @@ impl GpuLayer {
             self.lit,
             map,
             shift,
+            self.offset(),
+            self.clip.is_some(),
         )
     }
 }
@@ -728,10 +890,12 @@ fn quad_uniform(
     lit: bool,
     map: &FitMap,
     shift: [f64; 2],
+    offset: [f64; 2],
+    clip: bool,
 ) -> [f32; LAYER_FLOATS] {
     let c = [
-        position[0] + shift[0] * parallax,
-        position[1] + shift[1] * parallax,
+        position[0] + shift[0] * parallax + offset[0],
+        position[1] + shift[1] * parallax + offset[1],
     ];
     let [cos, sin] = rotation;
     // y가 아래로 커지는 좌표에서 (cos, sin)은 시계 방향 회전.
@@ -758,12 +922,27 @@ fn quad_uniform(
         v[1] as f32,
         cos as f32,
         sin as f32,
+        f32::from(u8::from(clip)),
+        0.0,
+        0.0,
+        0.0,
     ]
 }
 
-fn upload_layer(gpu: &Gpu, d: &wgpu::Device, b: &LayerBindings<'_>, l: &ImageLayer) -> GpuLayer {
+fn upload_layer(
+    gpu: &Gpu,
+    d: &wgpu::Device,
+    b: &LayerBindings<'_>,
+    l: ImageLayer,
+    fx: &EffectShared,
+    cropper: &Cropper,
+) -> Result<GpuLayer> {
     let texture = upload_texture(gpu, d, &l.id, &l.texture, TEXTURE_FORMAT);
     let t = &l.texture;
+    let size = [
+        f64::from(t.width) * l.scale[0],
+        f64::from(t.height) * l.scale[1],
+    ];
     let mut layer = GpuLayer::new(
         d,
         &l.id,
@@ -772,14 +951,13 @@ fn upload_layer(gpu: &Gpu, d: &wgpu::Device, b: &LayerBindings<'_>, l: &ImageLay
             opacity: l.opacity,
             parallax: l.parallax,
             position: l.position,
-            size: [
-                f64::from(t.width) * l.scale[0],
-                f64::from(t.height) * l.scale[1],
-            ],
+            size,
             rotation: l.rotation,
             lit: l.lit,
         },
     );
+    layer.clip = l.clip;
+    layer.follow = l.follow.map(FollowState::new);
     let normal = l
         .normal_map
         .as_ref()
@@ -788,10 +966,27 @@ fn upload_layer(gpu: &Gpu, d: &wgpu::Device, b: &LayerBindings<'_>, l: &ImageLay
     let normal_view = normal
         .as_ref()
         .map(|n| n.create_view(&wgpu::TextureViewDescriptor::default()));
-    layer.bind(d, b, &view, normal_view.as_ref());
+    if !l.effects.is_empty() {
+        let resolution = (t.width, t.height);
+        let effects = GpuEffects::new(
+            gpu,
+            d,
+            fx,
+            Some(cropper),
+            l.effects,
+            &view,
+            resolution,
+            size,
+            &l.id,
+        )?;
+        layer.bind(d, b, effects.result(), normal_view.as_ref(), None);
+        layer.effects = Some(Box::new(effects));
+    } else {
+        layer.bind(d, b, &view, normal_view.as_ref(), None);
+    }
     layer._texture = Some(texture);
     layer._normal = normal;
-    layer
+    Ok(layer)
 }
 
 /// image.wgsl 바인딩 중 레이어마다 같은 것.
@@ -801,6 +996,8 @@ pub(super) struct LayerBindings<'a> {
     /// 노멀맵이 없는 레이어의 노멀맵.
     pub flat_normal: &'a wgpu::TextureView,
     pub lights: &'a wgpu::Buffer,
+    /// clip이 없는 레이어에 묶는 1×1 (읽지 않음).
+    pub no_clip: &'a wgpu::TextureView,
 }
 
 /// 장면에 사각형으로 합성되는 레이어의 배치 (image 레이어, shader 레이어 결과).
@@ -837,8 +1034,29 @@ impl GpuLayer {
             bind_group: None,
             written: None,
             lit: p.lit,
+            clip: None,
+            follow: None,
+            views: None,
+            effects: None,
             _texture: None,
             _normal: None,
+        }
+    }
+
+    /// `follow` 이동량 (설계 px).
+    pub(super) fn offset(&self) -> [f64; 2] {
+        self.follow.as_ref().map_or([0.0; 2], |f| f.smooth.shift)
+    }
+
+    /// clip 대상의 단독 결과가 바뀌었을 때 (크기 변경) 같은 텍스처로 다시 묶는다.
+    pub(super) fn rebind(
+        &mut self,
+        d: &wgpu::Device,
+        b: &LayerBindings<'_>,
+        clip: Option<&wgpu::TextureView>,
+    ) {
+        if let Some((view, normal)) = self.views.take() {
+            self.bind(d, b, &view, normal.as_ref(), clip);
         }
     }
 
@@ -849,6 +1067,7 @@ impl GpuLayer {
         b: &LayerBindings<'_>,
         view: &wgpu::TextureView,
         normal: Option<&wgpu::TextureView>,
+        clip: Option<&wgpu::TextureView>,
     ) {
         self.bind_group = Some(d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("waywall scene layer"),
@@ -874,8 +1093,13 @@ impl GpuLayer {
                     binding: 4,
                     resource: b.lights.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(clip.unwrap_or(b.no_clip)),
+                },
             ],
         }));
+        self.views = Some((view.clone(), normal.cloned()));
     }
 }
 
@@ -1285,6 +1509,8 @@ mod tests {
                 true,
                 &map,
                 shift,
+                [0.0; 2],
+                false,
             )
         };
         let u = quad(0.0, 0.0, [0.0, 0.0]);
@@ -1370,6 +1596,42 @@ mod tests {
             samples.iter().any(|k| (k - samples[0]).abs() > 0.05),
             "varies"
         );
+    }
+
+    #[test]
+    fn follow_points_toward_the_pointer_within_limits() {
+        let spec = Follow {
+            anchor: [100.0, 100.0],
+            max_offset: [10.0, 4.0],
+            range: 200.0,
+            smoothing: 0.0,
+            on_leave: OnLeave::Center,
+        };
+        let mut f = FollowState::new(spec);
+        // 깨어난 첫 프레임은 dt = 0이라 움직이지 않는다 (패럴랙스와 같음).
+        f.step(Some([500.0, 100.0]), [0.0; 2], 0.016, 0.01);
+        assert!(!f.step(Some([500.0, 100.0]), [0.0; 2], 0.016, 0.01));
+        assert_eq!(f.smooth.shift, [10.0, 0.0], "far right: full x offset");
+        f.step(Some([100.0, 200.0]), [0.0; 2], 0.016, 0.01);
+        assert!(
+            (f.smooth.shift[1] - 2.0).abs() < 1e-9,
+            "half range: half offset ({:?})",
+            f.smooth.shift
+        );
+        // 기준점은 패럴랙스 이동을 따라간다.
+        f.step(Some([150.0, 100.0]), [50.0, 0.0], 0.016, 0.01);
+        assert_eq!(f.smooth.shift, [0.0, 0.0]);
+        f.step(Some([500.0, 100.0]), [0.0; 2], 0.016, 0.01);
+        f.step(None, [0.0; 2], 0.016, 0.01);
+        assert_eq!(f.smooth.shift, [0.0, 0.0], "center on leave");
+        let mut s = FollowState::new(Follow {
+            on_leave: OnLeave::Stay,
+            ..spec
+        });
+        s.step(Some([500.0, 100.0]), [0.0; 2], 0.016, 0.01);
+        s.step(Some([500.0, 100.0]), [0.0; 2], 0.016, 0.01);
+        s.step(None, [0.0; 2], 0.016, 0.01);
+        assert_eq!(s.smooth.shift, [10.0, 0.0], "stay on leave");
     }
 
     #[test]

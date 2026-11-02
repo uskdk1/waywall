@@ -14,6 +14,10 @@ struct Layer {
     design_u: vec2<f32>,
     design_v: vec2<f32>,
     rotation: vec2<f32>,   // (cos, sin), 시계 방향 — 노멀맵을 함께 돌린다
+    clip: f32,             // 1이면 clip 텍스처의 같은 픽셀 알파를 곱한다
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 // 광원 (docs/wallpaper-format.md#조명). 색은 선형 × intensity × 흔들림.
@@ -33,6 +37,7 @@ struct Lights {
 @group(0) @binding(2) var samp: sampler;
 @group(0) @binding(3) var normal_map: texture_2d<f32>;
 @group(0) @binding(4) var<storage, read> lights: Lights;
+@group(0) @binding(5) var clip_mask: texture_2d<f32>;   // clip 대상 레이어를 단독으로 그린 결과 (장면 크기)
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -51,7 +56,10 @@ fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(tex, samp, in.uv) * layer.opacity;
+    var c = textureSample(tex, samp, in.uv) * layer.opacity;
+    if layer.clip > 0.5 {
+        c *= textureLoad(clip_mask, vec2<i32>(in.pos.xy), 0).a;
+    }
     if layer.lit < 0.5 {
         return c;
     }

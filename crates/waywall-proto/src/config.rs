@@ -242,6 +242,24 @@ pub struct SceneOptions {
     pub shader: SceneShaderDefaults,
     pub particles: SceneParticleDefaults,
     pub light: SceneLightDefaults,
+    /// 효과 타입마다 생략한 필드 (`[types.scene.effects.<타입>]`). 효과 파일을 새로 둘 수 있어 표 그대로.
+    pub effects: toml::Table,
+    pub follow: FollowDefaults,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FollowDefaults {
+    pub range: f64,
+    pub smoothing: f64,
+    pub on_leave: OnLeave,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnLeave {
+    Center,
+    Stay,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

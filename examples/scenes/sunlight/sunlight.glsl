@@ -10,7 +10,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
     vec2 light = iPointer.z > 0.5 ? iPointer.xy / iResolution.xy : SUN_POS;
     vec2 stride = (uv - light) * DENSITY / float(SAMPLES);
-    vec2 p = uv;
+    // 픽셀마다 시작점을 한 간격 안에서 흩뜨려, 같은 간격으로 겹쳐 보이는 줄무늬를 고른 노이즈로 바꾼다.
+    float jitter = fract(sin(dot(fragCoord, vec2(12.9898, 78.233))) * 43758.5453);
+    vec2 p = uv - stride * jitter;
     float weight = 1.0;
     vec3 acc = vec3(0.0);
     for (int i = 0; i < SAMPLES; i++) {

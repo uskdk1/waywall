@@ -13,19 +13,20 @@ use toml::{Table, Value};
 use waywall_proto::Color;
 use waywall_proto::color::{linear_to_srgb, srgb_to_linear};
 use waywall_proto::config::{
-    Blend, ChannelDefaults, Emitter, EmitterShape, ParticlePointer, PointerMode, Ramp, Scale,
-    SceneOptions, Span, Turbulence, VelocityRange,
+    Blend, ChannelDefaults, Emitter, EmitterShape, OnLeave, ParticlePointer, PointerMode, Ramp,
+    Scale, SceneOptions, Span, Turbulence, VelocityRange,
 };
 use waywall_proto::project::WallpaperKind;
 
 use super::{
-    ChannelInput, ImageLayer, Layer, Light, ParticleLayer, SceneSpec, ShaderLayer, Texture,
+    ChannelInput, EffectKind, EffectSpec, Follow, ImageLayer, Layer, Light, ParticleLayer,
+    SceneSpec, ShaderLayer, Texture,
 };
 use crate::assets::Assets;
 use crate::backend::shader::{CHANNEL_NAMES, CHANNEL_SECTION, CHANNELS, parse_inputs};
 use crate::config::{Layers, OutputConfig, merge};
 use crate::gpu::compile_wgsl;
-use crate::gpu::shadertoy::{self, Language};
+use crate::gpu::shadertoy::{self, Language, UniformLayout};
 use crate::properties::{self, PropValue, Property};
 use crate::wallpaper::Wallpaper;
 
@@ -55,9 +56,23 @@ const BELOW: &str = "below";
 /// 파티클 무늬를 정하는 레이어 필드.
 const LOOK_KEYS: [&str; 2] = ["texture", "sprite"];
 const SPRITE_KEY: &str = "sprite";
-/// 아직 없는 기능: (필드 또는 레이어 타입, 들어오는 마일스톤).
-const NOT_YET_TYPES: [(&str, &str); 0] = [];
-const NOT_YET_FIELDS: [(&str, &str); 3] = [("clip", "M6d"), ("follow", "M6d"), ("effects", "M6d")];
+/// 레이어 타입이 받지 않는 공통 필드: (타입, 필드).
+const UNSUPPORTED: [(&str, &str); 4] = [
+    (PARTICLES, "clip"),
+    (PARTICLES, "follow"),
+    (PARTICLES, "effects"),
+    (SHADER, "effects"),
+];
+const FOLLOW_SECTION: &str = "follow";
+const EFFECTS_SECTION: &str = "effects";
+const EFFECTS_DIR: &str = "shaders/effects";
+const EFFECT_MASK_SHADER: &str = "shaders/scene/effect_mask.wgsl";
+/// 직접 쓴 셰이더 효과의 타입 이름.
+const EFFECT_SHADER: &str = "shader";
+/// 효과 파일의 엔트리 (인터페이스).
+const EFFECT_ENTRY: &str = "fs_main";
+/// 효과 파일 uniform 중 waywall이 채우는 멤버 (docs/wallpaper-format.md#레이어-효과-effects).
+const EFFECT_BUILTINS: [&str; 3] = ["time", "size", "resolution"];
 
 /// image 레이어 (병합 후). 필드 설명은 docs/wallpaper-format.md#레이어-타입.
 #[derive(Debug, Deserialize)]
@@ -76,6 +91,9 @@ struct ImageLayerDef {
     rotation: f64,
     lit: bool,
     normal_map: Option<String>,
+    clip: Option<String>,
+    follow: Option<Table>,
+    effects: Option<Vec<Table>>,
 }
 
 /// shader 레이어 (병합 후).
@@ -95,6 +113,8 @@ struct ShaderLayerDef {
     /// 채널에서 생략한 filter·wrap.
     channel: ChannelDefaults,
     render_scale: f64,
+    clip: Option<String>,
+    follow: Option<Table>,
 }
 
 /// particles 레이어 (병합 후).
@@ -162,7 +182,7 @@ const LIGHT_SECTION: &str = "light";
 const POINTER: &str = "pointer";
 
 enum LayerDef {
-    Image(ImageLayerDef),
+    Image(Box<ImageLayerDef>),
     Shader(Box<ShaderLayerDef>),
     /// `bool`: `sprite`가 레이어 자신의 값(배경 디렉터리 기준)인지. 아니면 assets 기준.
     Particles(Box<ParticleLayerDef>, bool),
@@ -190,6 +210,14 @@ impl LayerDef {
             LayerDef::Image(d) => Some(&d.texture),
             LayerDef::Shader(_) => None,
             LayerDef::Particles(d, _) => d.texture.as_ref(),
+        }
+    }
+
+    fn clip(&self) -> Option<&String> {
+        match self {
+            LayerDef::Image(d) => d.clip.as_ref(),
+            LayerDef::Shader(d) => d.clip.as_ref(),
+            LayerDef::Particles(..) => None,
         }
     }
 }
@@ -234,8 +262,8 @@ pub fn load(
         defs.push((id, def));
     }
 
-    // shader 레이어의 채널 입력. 레이어 id는 그보다 아래 레이어만 가리킬 수 있고,
-    // 입력으로 쓰이는 레이어는 visible = false여도 남긴다(그리지는 않음).
+    // shader 레이어의 채널 입력과 clip 대상. 레이어 id는 그보다 아래 레이어만 가리킬 수 있고,
+    // 입력·clip으로 쓰이는 레이어는 visible = false여도 남긴다(그리지는 않음).
     let user_channel = layers
         .user_type_section(WallpaperKind::Scene, SHADER)
         .and_then(|t| t.get(CHANNEL_SECTION))
@@ -243,6 +271,17 @@ pub fn load(
     let mut channel_defs = Vec::with_capacity(defs.len());
     let mut referenced = HashSet::new();
     for (k, (id, def)) in defs.iter().enumerate() {
+        if let Some(c) = def.clip() {
+            let j = *index
+                .get(c)
+                .with_context(|| format!("layer `{id}`: clip: no layer `{c}`"))?;
+            ensure!(j < k, "layer `{id}`: clip `{c}` must be a layer below it");
+            ensure!(
+                !matches!(defs[j].1, LayerDef::Shader(_)),
+                "layer `{id}`: clip `{c}` must be an image or particles layer"
+            );
+            referenced.insert(j);
+        }
         let LayerDef::Shader(d) = def else {
             channel_defs.push(Default::default());
             continue;
@@ -304,18 +343,32 @@ pub fn load(
                             .with_context(|| format!("layer `{id}`: normal_map {}", file.display()))
                     })
                     .transpose()?;
-                Layer::Image(ImageLayer {
-                    id,
+                let position = d.position.unwrap_or([doc.size[0] / 2.0, doc.size[1] / 2.0]);
+                Layer::Image(Box::new(ImageLayer {
+                    id: id.clone(),
                     blend: d.blend,
                     opacity: d.opacity,
                     parallax: d.parallax,
-                    position: d.position.unwrap_or([doc.size[0] / 2.0, doc.size[1] / 2.0]),
+                    position,
                     scale: d.scale.xy(),
                     rotation: d.rotation,
                     texture: texture.context("image layer without a texture")?,
                     lit: d.lit,
                     normal_map,
-                })
+                    clip: d.clip.as_ref().map(|c| new_index[&index[c]]),
+                    follow: follow_spec(d.follow, &opts, layers, position)
+                        .with_context(|| format!("layer `{id}`: follow"))?,
+                    effects: d
+                        .effects
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, e)| {
+                            effect_spec(e, base, &opts, layers, assets, &props)
+                                .with_context(|| format!("layer `{id}`: effects[{i}]"))
+                        })
+                        .collect::<Result<_>>()?,
+                }))
             }
             LayerDef::Particles(d, own_sprite) => {
                 let sprite = if own_sprite {
@@ -359,19 +412,27 @@ pub fn load(
                         ChannelInput::Image(t)
                     });
                 }
+                let rect = d.rect.unwrap_or([0.0, 0.0, doc.size[0], doc.size[1]]);
+                let center = [rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0];
                 Layer::Shader(Box::new(ShaderLayer {
-                    id,
+                    id: id.clone(),
                     blend: d.blend,
                     opacity: d.opacity,
                     parallax: d.parallax,
-                    rect: d.rect.unwrap_or([0.0, 0.0, doc.size[0], doc.size[1]]),
+                    rect,
                     compiled,
                     props: props.clone(),
                     lang,
                     inputs,
                     sampling,
                     render_scale: d.render_scale,
-                    direct: d.opacity == 1.0 && d.render_scale == 1.0 && !referenced.contains(&old),
+                    direct: d.opacity == 1.0
+                        && d.render_scale == 1.0
+                        && d.clip.is_none()
+                        && !referenced.contains(&old),
+                    clip: d.clip.as_ref().map(|c| new_index[&index[c]]),
+                    follow: follow_spec(d.follow, &opts, layers, center)
+                        .with_context(|| format!("layer `{id}`: follow"))?,
                 }))
             }
         });
@@ -391,6 +452,12 @@ pub fn load(
         !lit || !scene_lights.is_empty(),
         "a layer has `lit = true` but the scene has no [[light]]"
     );
+    let shader_effects = scene_layers.iter().any(|l| {
+        matches!(l, Layer::Image(i) if i.effects.iter().any(|e| matches!(e.kind, EffectKind::Shader { .. })))
+    });
+    let effect_mask_shader = shader_effects
+        .then(|| compile_wgsl(EFFECT_MASK_SHADER, &asset_text(assets, EFFECT_MASK_SHADER)?))
+        .transpose()?;
     let post = &opts.post;
     ensure!(
         post.bloom.intensity >= 0.0 && post.bloom.threshold >= 0.0,
@@ -425,6 +492,7 @@ pub fn load(
         post_shader,
         simulate_shader,
         input_shader,
+        effect_mask_shader,
     };
     Ok((spec, opts))
 }
@@ -560,9 +628,6 @@ fn layer_def(
         .and_then(Value::as_str)
         .with_context(|| format!("{}: missing `type`", ctx()))?
         .to_owned();
-    if let Some((_, m)) = NOT_YET_TYPES.iter().find(|(t, _)| *t == kind) {
-        bail!("{}: {kind} layers are not supported yet ({m})", ctx());
-    }
     let type_defaults = match kind.as_str() {
         IMAGE => Table::try_from(&opts.image)?,
         PARTICLES => Table::try_from(&opts.particles)?,
@@ -572,8 +637,11 @@ fn layer_def(
             ctx()
         ),
     };
-    if let Some((f, m)) = NOT_YET_FIELDS.iter().find(|(f, _)| raw.contains_key(*f)) {
-        bail!("{}: `{f}` is not supported yet ({m})", ctx());
+    if let Some((_, f)) = UNSUPPORTED
+        .iter()
+        .find(|(t, f)| *t == kind && raw.contains_key(*f))
+    {
+        bail!("{}: `{f}` is not supported for {kind} layers", ctx());
     }
     let own_look = LOOK_KEYS.iter().any(|k| raw.contains_key(*k));
     let own_sprite = raw.contains_key(SPRITE_KEY);
@@ -593,7 +661,7 @@ fn layer_def(
         merge(&mut t, &u);
     }
     match kind.as_str() {
-        IMAGE => return Ok(LayerDef::Image(t.try_into().with_context(ctx)?)),
+        IMAGE => return Ok(LayerDef::Image(Box::new(t.try_into().with_context(ctx)?))),
         SHADER => {
             let d: ShaderLayerDef = t.try_into().with_context(ctx)?;
             if let Some(r) = d.rect {
@@ -707,6 +775,197 @@ fn light(
                 color: rgb(color, intensity),
             }
         }
+    })
+}
+
+/// `follow` 표 → 따라가기. 계층: `[types.scene.follow]` 내장값 < 레이어 < 사용자 섹션.
+fn follow_spec(
+    raw: Option<Table>,
+    opts: &SceneOptions,
+    layers: &Layers,
+    default_anchor: [f64; 2],
+) -> Result<Option<Follow>> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FollowDef {
+        anchor: Option<[f64; 2]>,
+        max_offset: [f64; 2],
+        range: f64,
+        smoothing: f64,
+        on_leave: OnLeave,
+    }
+    let Some(raw) = raw else { return Ok(None) };
+    let mut t = Table::try_from(&opts.follow)?;
+    merge(&mut t, &raw);
+    if let Some(u) = layers.user_type_section(WallpaperKind::Scene, FOLLOW_SECTION) {
+        merge(&mut t, u);
+    }
+    let d: FollowDef = t.try_into()?;
+    ensure!(d.range > 0.0, "`range` must be positive");
+    ensure!(d.smoothing >= 0.0, "`smoothing` must be >= 0");
+    ensure!(
+        d.max_offset.iter().all(|v| *v >= 0.0),
+        "`max_offset` must not be negative"
+    );
+    Ok(Some(Follow {
+        anchor: d.anchor.unwrap_or(default_anchor),
+        max_offset: d.max_offset,
+        range: d.range,
+        smoothing: d.smoothing,
+        on_leave: d.on_leave,
+    }))
+}
+
+/// `effects`의 한 항목 (docs/wallpaper-format.md#레이어-효과-effects).
+fn effect_spec(
+    mut raw: Table,
+    base: &Path,
+    opts: &SceneOptions,
+    layers: &Layers,
+    assets: &Assets,
+    props: &[Property],
+) -> Result<EffectSpec> {
+    let kind = match raw.remove("type") {
+        Some(Value::String(s)) => s,
+        _ => bail!("missing `type`"),
+    };
+    let mask = match raw.remove("mask") {
+        None => None,
+        Some(Value::String(m)) => {
+            let file = base.join(&m);
+            Some(decode_raw(&file).with_context(|| format!("mask {}", file.display()))?)
+        }
+        Some(_) => bail!("`mask` must be a path"),
+    };
+    if kind == EFFECT_SHADER {
+        return shader_effect(raw, mask, base, opts, layers, assets, props);
+    }
+    let valid = !kind.is_empty()
+        && kind
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    ensure!(
+        valid,
+        "effect type `{kind}`: expected a file name like `sway`"
+    );
+    let path = format!("{EFFECTS_DIR}/{kind}.wgsl");
+    let text = asset_text(assets, &path).with_context(|| format!("unknown effect `{kind}`"))?;
+    let module = compile_wgsl(&path, &text)?;
+    ensure!(
+        module
+            .entry_points
+            .iter()
+            .any(|e| e.name == EFFECT_ENTRY && e.stage == naga::ShaderStage::Fragment),
+        "{path}: no @fragment fn {EFFECT_ENTRY}"
+    );
+    let layout = UniformLayout::from_module(&module)?;
+
+    // 값: [types.scene.effects.<type>](내장 < 사용자) < 효과 표 < 사용자가 직접 적은 섹션.
+    let mut t = match opts.effects.get(&kind) {
+        Some(Value::Table(d)) => d.clone(),
+        _ => Table::new(),
+    };
+    merge(&mut t, &raw);
+    if let Some(Value::Table(u)) = layers
+        .user_type_section(WallpaperKind::Scene, EFFECTS_SECTION)
+        .and_then(|e| e.get(&kind))
+    {
+        merge(&mut t, u);
+    }
+    let members: Vec<&str> = layout.member_names().collect();
+    let mut values = HashMap::new();
+    for (key, value) in t {
+        ensure!(
+            members.contains(&key.as_str()) && !EFFECT_BUILTINS.contains(&key.as_str()),
+            "`{key}` is not a field of effect `{kind}` (see {path})"
+        );
+        let nums = match &value {
+            Value::Array(a) => a.iter().map(number).collect::<Option<Vec<_>>>(),
+            v => number(v).map(|n| vec![n]),
+        }
+        .with_context(|| format!("`{key}` must be a number or an array of numbers"))?;
+        values.insert(key, nums.into_iter().map(|n| n as f32).collect());
+    }
+    if let Some(m) = members
+        .iter()
+        .find(|m| !EFFECT_BUILTINS.contains(m) && !m.starts_with('_') && !values.contains_key(**m))
+    {
+        bail!("effect `{kind}`: missing `{m}`");
+    }
+    Ok(EffectSpec {
+        kind: EffectKind::Builtin {
+            name: kind,
+            module,
+            layout,
+            values,
+        },
+        mask,
+    })
+}
+
+/// `type = "shader"` 효과: Shadertoy 형식, iChannel0 = 효과를 적용할 이미지, iChannel1–3 = 이미지 경로.
+#[allow(clippy::too_many_arguments)]
+fn shader_effect(
+    mut raw: Table,
+    mask: Option<Texture>,
+    base: &Path,
+    opts: &SceneOptions,
+    layers: &Layers,
+    assets: &Assets,
+    props: &[Property],
+) -> Result<EffectSpec> {
+    let source = match raw.remove("source") {
+        Some(Value::String(s)) => s,
+        _ => bail!("missing `source`"),
+    };
+    let inputs = match raw.remove("inputs") {
+        None => None,
+        Some(Value::Table(t)) => Some(t),
+        Some(_) => bail!("`inputs` must be a table"),
+    };
+    if let Some(k) = raw.keys().next() {
+        bail!("unknown field `{k}` (source | inputs | mask)");
+    }
+    let path = base.join(&source);
+    let text = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
+    let lang = Language::from_path(&path);
+    let compiled = shadertoy::compile(assets, lang, &text, props, &source)?;
+    let user_channel = layers
+        .user_type_section(WallpaperKind::Scene, SHADER)
+        .and_then(|t| t.get(CHANNEL_SECTION))
+        .and_then(Value::as_table);
+    let defs = parse_inputs(inputs.as_ref(), &opts.shader.channel, user_channel)?;
+    let mut channels: [Option<Texture>; CHANNELS] = Default::default();
+    let mut sampling = [opts.shader.channel; CHANNELS];
+    for (i, c) in defs.into_iter().enumerate() {
+        let Some(c) = c else { continue };
+        ensure!(
+            i != 0,
+            "inputs: iChannel0 is the image the effect applies to"
+        );
+        ensure!(
+            c.source != BELOW,
+            "inputs: effects take image files only (`{}`)",
+            c.source
+        );
+        let file = base.join(&c.source);
+        let mut t =
+            decode(&file).with_context(|| format!("{}: {}", CHANNEL_NAMES[i], file.display()))?;
+        if lang == Language::Glsl {
+            flip_rows(&mut t);
+        }
+        channels[i] = Some(t);
+        sampling[i] = c.sampling;
+    }
+    Ok(EffectSpec {
+        kind: EffectKind::Shader {
+            compiled,
+            props: props.to_vec(),
+            lang,
+            channels,
+            sampling,
+        },
+        mask,
     })
 }
 
@@ -968,7 +1227,7 @@ mod tests {
         l: &Layers,
     ) -> ImageLayerDef {
         match layer_def(0, raw, o, common, l).unwrap() {
-            LayerDef::Image(d) => d,
+            LayerDef::Image(d) => *d,
             _ => panic!("not an image layer"),
         }
     }
@@ -1063,7 +1322,14 @@ mod tests {
             ),
             ("type = \"blob\"", "unknown layer type"),
             ("type = \"image\"\ntexture = \"a.png\"\nlit = 1", "lit"),
-            ("type = \"image\"\ntexture = \"a.png\"\nclip = \"x\"", "M6d"),
+            (
+                "type = \"particles\"\nclip = \"x\"",
+                "not supported for particles",
+            ),
+            (
+                "type = \"shader\"\nsource = \"a.glsl\"\neffects = []",
+                "not supported for shader",
+            ),
             ("type = \"image\"\ntexture = \"a.png\"\nzoom = 1", "zoom"),
             ("type = \"image\"", "texture"),
             ("type = \"particles\"\nmax = 0", "max"),
@@ -1086,6 +1352,61 @@ mod tests {
             let e = match layer_def(0, bad.parse().unwrap(), &o, None, &l) {
                 Ok(_) => panic!("{bad} should be rejected"),
                 Err(e) => e,
+            };
+            assert!(format!("{e:#}").contains(why), "{bad}: {e:#}");
+        }
+    }
+
+    #[test]
+    fn follow_layers_like_other_fields() {
+        let l = Layers::load_for_test("[types.scene.follow]\nsmoothing = 0.5");
+        let o = scene_opts(&l);
+        let raw: Table = "max_offset = [6, 4]\nsmoothing = 0.0\non_leave = \"stay\""
+            .parse()
+            .unwrap();
+        let f = follow_spec(Some(raw), &o, &l, [10.0, 20.0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(f.anchor, [10.0, 20.0], "defaults to the layer center");
+        assert_eq!(f.max_offset, [6.0, 4.0]);
+        assert_eq!(f.range, o.follow.range, "built-in default");
+        assert_eq!(f.smoothing, 0.5, "user beats layer");
+        assert_eq!(f.on_leave, OnLeave::Stay);
+        assert!(follow_spec(None, &o, &l, [0.0; 2]).unwrap().is_none());
+        let bad: Table = "max_offset = [1, 1]\nrange = 0".parse().unwrap();
+        assert!(follow_spec(Some(bad), &o, &l, [0.0; 2]).is_err());
+        let missing: Table = "range = 5".parse().unwrap();
+        assert!(follow_spec(Some(missing), &o, &l, [0.0; 2]).is_err());
+    }
+
+    #[test]
+    fn builtin_effect_fields_match_uniform_members() {
+        let l = Layers::load_for_test("[types.scene.effects.sway]\nspeed = 2.0");
+        let o = scene_opts(&l);
+        let assets = Assets::new(std::path::PathBuf::from("/nonexistent"));
+        let base = Path::new("/");
+        let raw: Table = "type = \"sway\"\nstrength = 9\nspeed = 1.0"
+            .parse()
+            .unwrap();
+        let e = effect_spec(raw, base, &o, &l, &assets, &[]).unwrap();
+        let EffectKind::Builtin { values, .. } = e.kind else {
+            panic!("sway is a built-in effect");
+        };
+        assert_eq!(values["strength"], [9.0]);
+        assert_eq!(values["speed"], [2.0], "user beats the effect table");
+        assert_eq!(values["direction"], [1.0, 0.0], "built-in default");
+        assert!(e.mask.is_none());
+        for (bad, why) in [
+            ("type = \"sway\"\nwobble = 1", "wobble"),
+            ("type = \"sway\"\ntime = 1", "time"),
+            ("type = \"sway\"\nstrength = \"big\"", "number"),
+            ("type = \"nope\"", "unknown effect"),
+            ("type = \"../x\"", "file name"),
+            ("type = \"shader\"", "source"),
+            ("strength = 1", "type"),
+        ] {
+            let Err(e) = effect_spec(bad.parse().unwrap(), base, &o, &l, &assets, &[]) else {
+                panic!("{bad} should be rejected");
             };
             assert!(format!("{e:#}").contains(why), "{bad}: {e:#}");
         }

@@ -271,7 +271,7 @@ pub struct UniformLayout {
 impl UniformLayout {
     /// group 0 binding 0의 uniform 구조체. 셰이더가 uniform을 쓰지 않아 최적화로 사라졌어도 동작하도록,
     /// 없으면 빈 레이아웃(최소 크기)으로 둔다.
-    fn from_module(module: &Module) -> Result<Self> {
+    pub fn from_module(module: &Module) -> Result<Self> {
         let Some((_, var)) = module.global_variables.iter().find(|(_, v)| {
             v.space == AddressSpace::Uniform
                 && v.binding
@@ -331,6 +331,39 @@ impl UniformLayout {
     /// 버퍼 크기. wgpu는 0 크기 버퍼에 바인딩할 수 없고 uniform은 16바이트 단위다.
     pub fn buffer_size(&self) -> u64 {
         u64::from(self.size.max(1)).next_multiple_of(16)
+    }
+
+    /// 멤버 이름 (선언 순서).
+    pub fn member_names(&self) -> impl Iterator<Item = &str> {
+        self.members.iter().map(|m| m.name.as_str())
+    }
+
+    /// 멤버 이름으로 값(성분을 이어 붙인 f32)을 찾아 쓴다. 효과 파일처럼 이름이 정해지지 않은 uniform용.
+    pub fn write_named<'a>(&self, value: impl Fn(&str) -> Option<&'a [f32]>) -> Vec<u8> {
+        let mut buf = vec![0u8; self.buffer_size() as usize];
+        for m in &self.members {
+            let Some(values) = value(&m.name) else {
+                continue;
+            };
+            let per = m.components as usize;
+            for k in 0..m.count as usize {
+                for i in 0..per {
+                    let Some(v) = values.get(k * per + i) else {
+                        continue;
+                    };
+                    let at = m.offset as usize + k * m.stride as usize + i * 4;
+                    let bytes = match m.scalar {
+                        Scalar::Float => v.to_ne_bytes(),
+                        Scalar::Int => (*v as i32).to_ne_bytes(),
+                        Scalar::Uint => (v.max(0.0) as u32).to_ne_bytes(),
+                    };
+                    if let Some(dst) = buf.get_mut(at..at + 4) {
+                        dst.copy_from_slice(&bytes);
+                    }
+                }
+            }
+        }
+        buf
     }
 
     /// 멤버마다 채울 값. 속성 목록은 렌더러가 사는 동안 바뀌지 않으므로 한 번만 찾는다.

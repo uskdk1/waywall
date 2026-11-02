@@ -200,8 +200,7 @@ assets/
 │  ├─ vignette.wgsl         # fn vignette(uv: vec2<f32>, strength: f32) -> f32
 │  ├─ particles/simulate.wgsl   # compute: 방출(고리 버퍼) · 적분 · curl noise · 포인터 힘
 │  ├─ particles/render.wgsl     # 인스턴스 사각형. 뒤에 스프라이트 파일이 붙어 `fn sprite(uv) -> vec4<f32>`를 정의
-│  ├─ effects/sway.wgsl     # 레이어 효과. 새 파일을 두면 새 효과 타입 (M6d)
-│  ├─ clip.wgsl             # 레이어 clip (M6d)
+│  ├─ effects/sway.wgsl     # 레이어 효과. 새 파일을 두면 새 효과 타입 (uniform 멤버를 효과 필드 이름으로 채움)
 │  └─ shadertoy/prelude.glsl, epilogue.glsl, prelude.wgsl   # 인터페이스 선언(uniform 블록)과 main() 래퍼
 └─ sprites/
    └─ soft-circle.wgsl      # 무늬를 정하지 않은 파티클의 기본 스프라이트 (`fn sprite`)
@@ -307,8 +306,7 @@ color     = "#ffffff"
 intensity = 1.0
 direction = [0.0, 0.0, -1.0]
 
-# 아래 두 섹션은 M6d에서 defaults.toml에 추가된다
-[types.scene.effects.sway]  # sway 효과에서 생략한 필드
+[types.scene.effects.sway]  # sway 효과에서 생략한 필드 (새 효과 파일을 두면 [types.scene.effects.<이름>]으로 기본값)
 strength  = 4.0            # px
 speed     = 0.6
 scale     = 0.01

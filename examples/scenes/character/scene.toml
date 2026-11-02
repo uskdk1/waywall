@@ -1,0 +1,46 @@
+# M6d 예제: 레이어 효과(sway) + clip + follow (docs/wallpaper-format.md#레이어-효과-effects).
+# 머리카락만 바람에 흔들리고(마스크 밖은 고정), 눈동자는 흰자 밖으로 나가지 않으면서 커서를 따라본다.
+# 창문의 밝은 부분에서 빛줄기가 들어온다.
+
+[scene]
+width  = 1920
+height = 1080
+fit    = "cover"
+clear  = "#000000"
+
+[[layer]]
+type    = "image"
+id      = "room"
+texture = "textures/room.png"     # 480×270
+scale   = 4.0
+
+[[layer]]
+type    = "image"
+id      = "character"
+texture = "textures/character.png"
+effects = [{ type = "sway", mask = "textures/hair_mask.png", strength = 10, speed = 0.7, scale = 0.006 }]
+
+[[layer]]
+type     = "image"
+id       = "eye_white"
+texture  = "textures/eye_white.png"
+position = [960, 540]
+
+[[layer]]
+type     = "image"
+id       = "pupils"
+texture  = "textures/pupils.png"
+position = [960, 540]
+clip     = "eye_white"
+follow   = { max_offset = [16, 9] }
+
+[[layer]]
+type         = "shader"
+id           = "sunlight"
+source       = "sunlight.glsl"
+inputs       = { iChannel0 = "below" }
+blend        = "add"
+render_scale = 0.5
+
+[post]
+tonemap = "agx"

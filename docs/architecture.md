@@ -142,7 +142,7 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
 - 후처리 셰이더는 `scene/post.wgsl` + `tonemap/<이름>.wgsl`을 이어 붙여 naga로 검증. 톤매핑 함수만 바꾸는 사용자 파일은 짧다.
 - swapchain은 sRGB 포맷(없으면 UNORM + sRGB 뷰 포맷)으로 만들어 인코딩을 하드웨어가 한다. 셰이더 배경의 UNORM(값 그대로)과 다르다.
 - **shader 레이어:** 셰이더 배경과 같은 컴파일 경로(`gpu/shadertoy.rs`, 같은 프리앰블·uniform). 그리는 방법은 두 가지다.
-  - **직접:** `opacity = 1`, `render_scale = 1`이고 다른 레이어의 입력이 아니면, HDR 버퍼에 화면 삼각형을 그리되 scissor로 rect 영역만 남기고
+  - **직접:** `opacity = 1`, `render_scale = 1`, `clip` 없음이고 다른 레이어의 입력이 아니면, HDR 버퍼에 화면 삼각형을 그리되 scissor로 rect 영역만 남기고
     블렌드는 파이프라인의 고정 블렌드(`blend`)로 한다. 중간 텍스처의 쓰기·읽기와 합성이 없다. 렌더 타깃 기준 좌표를 레이어 기준으로
     바꾸는 값은 uniform의 origin(GLSL은 에필로그가 `fragCoord`에서 빼 주고, WGSL은 `g.origin`)이다. 이 레이어 앞에서 레이어 패스를 끊는다.
   - **텍스처 경유:** 그 밖에는 `rect`를 렌더 px로 옮긴 크기의 `Rgba16Float` 텍스처에 그린 뒤(origin = 0), image 레이어와 같은
@@ -153,6 +153,14 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
   rect 크기의 `Rgba16Float`에 쓰고, GLSL이면 상하를 뒤집는다. 원본 포맷과 관계없이 필터링 가능한 포맷이 된다.
   `"below"`를 읽는 레이어가 있으면 레이어 패스를 그 앞에서 끊는다(같은 텍스처를 읽으며 쓸 수 없음). 레이어 id 입력은 그 레이어를
   투명 바탕의 장면 크기 텍스처에 따로 그린다.
+- **효과 (`effects`):** image 레이어마다 이미지 크기의 `Rgba16Float` 텍스처 두 장을 번갈아 쓰며, 효과마다 화면 삼각형 패스 하나
+  (원본 → 효과 1 → 효과 2 …). 레이어 사각형은 마지막 결과를 읽는다. 효과 파일의 uniform은 셰이더 배경과 같은 방식(naga로 멤버 이름·offset을
+  읽음)으로 채운다: `time`·`size`·`resolution`은 waywall, 나머지는 효과 표의 같은 이름 필드. `shader` 효과는 Shadertoy 컴파일 경로를 쓰고
+  결과를 마스크로 원본과 섞는 패스가 하나 더 붙는다.
+- **`clip`:** 대상 레이어를 투명 바탕의 장면 크기 텍스처에 단독으로 그리고(shader 레이어 입력과 같은 `isolated`, 프레임 처음에 아래부터),
+  image 셰이더가 그 텍스처의 같은 픽셀 알파를 곱한다(바인딩 5, `textureLoad`). 대상이 아래 레이어라 순서대로 그리면 늘 준비되어 있다.
+  clip이 있는 shader 레이어는 합성 사각형이 필요하므로 텍스처 경유로 그린다.
+- **`follow`:** 레이어마다 패럴랙스와 같은 지수 추적(`smoothing`, 정착 `settle_px`)을 하고, 이동량을 사각형 위치에 더한다.
 - **조명:** `scene/image.wgsl` + `scene/lighting.wgsl`. 광원 목록은 storage 버퍼 하나(앰비언트 합 + 광원 배열)이며 CPU가 프레임마다
   `"pointer"` 위치와 `flicker`를 반영해 쓴다. 레이어 uniform에 설계 좌표 축(조명 위치 계산)과 회전(노멀맵 회전)을 넣는다.
   `lit`이 아닌 레이어는 같은 셰이더에서 조명 계산을 건너뛴다.

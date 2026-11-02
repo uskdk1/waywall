@@ -310,9 +310,9 @@ vignette = 0.35
 | `opacity` | 불투명도 (0–1) |
 | `parallax` | 포인터가 화면 중심에서 벗어난 만큼 반대로 이동하는 비율 ([패럴랙스](#패럴랙스)) |
 | `visible` | 표시 여부. `"$속성"`으로 토글 가능 |
-| `clip` | 다른 레이어 `id`. 그 레이어가 불투명한(알파 > 0) 곳에만 그림. 예: 눈동자를 흰자 안에만 |
-| `follow` | 포인터 쪽으로 제한된 거리만큼 움직임 ([포인터 따라가기](#포인터-따라가기-follow)) |
-| `effects` | 레이어에 차례로 적용할 효과 목록 ([레이어 효과](#레이어-효과-effects)) |
+| `clip` | 다른 레이어 `id`. 그 레이어의 모양 안에만 그림 (image·shader, [clip](#clip)). 예: 눈동자를 흰자 안에만 |
+| `follow` | 포인터 쪽으로 제한된 거리만큼 움직임 (image·shader, [포인터 따라가기](#포인터-따라가기-follow)) |
+| `effects` | 레이어에 차례로 적용할 효과 목록 (image, [레이어 효과](#레이어-효과-effects)) |
 
 ### 레이어 타입
 
@@ -489,14 +489,13 @@ HDR 장면 ─▶ + 블룸 × intensity ─▶ × exposure ─▶ tonemap ─▶
 
 ### 구현 상태
 
-M6c까지 `image`·`particles`·`shader` 레이어, 조명, 패럴랙스, `[post]` 전체가 동작합니다. 아직 없는 기능을 쓰면
-배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다: `clip` · `follow` · `effects`(M6d).
+M6d로 이 문서의 씬 기능이 모두 동작합니다. 레이어 타입이 지원하지 않는 필드(예: particles의 `clip`)를 쓰면
+배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다.
 
 ### 레이어 효과 (`effects`)
 
-레이어를 그리기 전에 그 레이어의 이미지에 적용하는 셰이더입니다. 목록 순서대로 적용합니다.
-내장 효과는 `assets/shaders/effects/<type>.wgsl` 파일이며, 사용자 assets 디렉터리에 같은 이름을 두면 교체되고
-새 이름의 파일을 두면 새 효과 타입이 됩니다([config.md](config.md#assets)).
+image 레이어의 이미지를 그리기 전에 바꾸는 셰이더입니다. 목록 순서대로 적용하며(앞 효과의 결과가 다음 효과의 입력), 시간에 따라
+변하므로 효과가 있는 씬은 잠들지 않습니다.
 
 ```toml
 effects = [
@@ -504,18 +503,55 @@ effects = [
 ]
 ```
 
+| 필드 | 설명 |
+|---|---|
+| `type` | 효과 이름. `assets/shaders/effects/<type>.wgsl` 파일이거나 `shader`(직접 쓴 셰이더) |
+| `mask` | 흑백 이미지 (배경 디렉터리 기준, R 채널, 흰색 = 효과 100%). 레이어 이미지와 같은 uv로 대응. 생략하면 전체에 적용 |
+| 그 밖 | 효과마다 다름 (아래) |
+
+내장 효과:
+
 | 타입 | 필드 | 설명 |
 |---|---|---|
-| `sway` | `mask`, `strength`(px), `speed`, `scale`, `direction`(`[x, y]`) | 마스크의 흰 부분만 노이즈로 밀어서 바람에 흔들리게 함. 마스크가 검은 곳(뿌리 쪽)은 고정 |
-| `shader` | `source`, `inputs` | 직접 쓴 효과 셰이더. `iChannel0` = 이 레이어 이미지, 나머지는 shader 레이어의 `inputs`와 같음 |
+| `sway` | `strength`(px), `speed`, `scale`(1/px), `direction`(`[x, y]`) | 매끄러운 노이즈로 이미지를 `direction` 쪽으로 밀어 바람에 흔들리게 함. 미는 거리 = `strength × 마스크`라 마스크가 검은 곳(뿌리 쪽)은 고정 |
+| `shader` | `source`, `inputs` | 직접 쓴 효과 셰이더(Shadertoy GLSL 또는 WGSL). `iChannel0` = 효과를 적용할 이미지, `inputs`로 `iChannel1`–`iChannel3`에 이미지(경로)를 넣음. 결과를 마스크로 원본과 섞음 |
 
-모든 효과는 `mask`(흑백 이미지, 흰색 = 효과 100%)를 받을 수 있고, 생략하면 레이어 전체에 적용합니다.
-필드를 생략하면 `defaults.toml`의 `[types.scene.effects.<type>]` 값을 씁니다.
+생략한 필드는 `[types.scene.effects.<type>]`(사용자 값 > `defaults.toml`)을 쓰며, 사용자가 그 섹션에 적은 값은 씬의 값보다 우선합니다.
+
+**효과 파일 만들기.** `assets/shaders/effects/<이름>.wgsl`(사용자 assets 디렉터리)에 파일을 두면 `type = "<이름>"`으로 쓸 수 있습니다.
+화면을 덮는 삼각형(`fullscreen.wgsl`)으로 이미지 크기의 출력에 그리며, 아래를 선언합니다.
+
+```wgsl
+struct Effect {
+    time: f32,             // waywall이 채움: 배경 시계(초)
+    size: vec2<f32>,       // waywall이 채움: 레이어의 화면 크기 (설계 px)
+    resolution: vec2<f32>, // waywall이 채움: 이미지 크기 (px)
+    strength: f32,         // 그 밖의 멤버는 효과 표의 같은 이름 필드 (숫자 또는 숫자 배열)
+}
+@group(0) @binding(0) var<uniform> fx: Effect;
+@group(0) @binding(1) var src: texture_2d<f32>;      // 입력 이미지 (선형, premultiplied)
+@group(0) @binding(2) var src_sampler: sampler;
+@group(0) @binding(3) var mask: texture_2d<f32>;     // 마스크 (없으면 1×1 흰색)
+
+@fragment
+fn fs_main(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> { … }
+```
+
+효과 표의 필드와 구조체 멤버는 이름으로 짝지어지며, 멤버가 없는 필드나 값이 없는 멤버는 오류입니다. 내장 `sway.wgsl`이 예입니다.
+
+### `clip`
+
+image·shader 레이어에서 다른 레이어 `id`를 적으면, 그 레이어를 단독으로 그린 결과의 **알파를 곱해** 그 모양 안에만 보이게 합니다
+(가장자리가 반투명하면 부드럽게 잘림). 예: 눈동자를 흰자 안에만.
+
+- 대상은 이 레이어보다 **아래**의 image·particles 레이어입니다. `visible = false`인 레이어도 됩니다(화면에는 안 그림).
+- 장면 버퍼에 알파가 있어야 하므로 `render.hdr_format = "rg11b10ufloat"`에서는 오류입니다.
+- 대상 레이어의 패럴랙스·`follow`도 반영된 현재 모양으로 자릅니다.
 
 ### 포인터 따라가기 (`follow`)
 
-레이어를 기준점에서 포인터 방향으로 최대 `max_offset`만큼 옮깁니다. 캐릭터의 눈동자처럼 "쳐다보는" 움직임용입니다.
-`parallax`(반대 방향, 깊이감)와 달리 포인터를 **향해** 움직이고, 거리에 상한이 있습니다.
+image·shader 레이어를 기준점에서 포인터 방향으로 최대 `max_offset`만큼 옮깁니다. 캐릭터의 눈동자처럼 "쳐다보는" 움직임용입니다.
+`parallax`(반대 방향, 깊이감)와 달리 포인터를 **향해** 움직이고, 거리에 상한이 있습니다. 둘을 같이 쓰면 더해집니다.
 
 ```toml
 follow = { anchor = [812, 403], max_offset = [6, 4], range = 600, smoothing = 0.12, on_leave = "center" }
@@ -523,13 +559,14 @@ follow = { anchor = [812, 403], max_offset = [6, 4], range = 600, smoothing = 0.
 
 | 필드 | 설명 |
 |---|---|
-| `anchor` | 기준점(눈 중심) 좌표. 생략하면 레이어 `position` |
-| `max_offset` | 최대 이동량 `[x, y]` (px) |
+| `anchor` | 기준점(눈 중심) 좌표. 생략하면 레이어 중심(image는 `position`, shader는 `rect` 중심). 레이어의 패럴랙스 이동을 따라감 |
+| `max_offset` | 최대 이동량 `[x, y]` (px). 필수 |
 | `range` | 포인터가 기준점에서 이 거리(px) 이상 떨어지면 최대 이동 |
 | `smoothing` | 따라가는 데 걸리는 시간 상수(초). `0`이면 즉시 |
 | `on_leave` | 포인터가 배경 밖으로 나가면 `center`(제자리로) · `stay`(마지막 위치 유지) |
 
 이동량 = `normalize(포인터 − anchor) × min(1, 거리 / range) × max_offset`. 생략한 필드는 `[types.scene.follow]` 값을 씁니다.
+목표에 닿으면(`[types.scene] settle_px` 미만) 멈추고 잠듭니다.
 
 ### 예: 햇빛 + 흔들리는 머리카락 + 따라보는 눈
 

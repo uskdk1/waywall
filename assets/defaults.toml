@@ -139,6 +139,17 @@ color     = "#ffffff"
 intensity = 1.0
 direction = [0.0, 0.0, -1.0] # x 오른쪽, y 아래, z 보는 사람 쪽
 
+[types.scene.effects.sway]   # sway 효과에서 생략한 필드. 새 효과 파일은 [types.scene.effects.<이름>]으로 기본값
+strength  = 4.0              # 설계 px (마스크 흰색일 때)
+speed     = 0.6              # 흔들림이 바뀌는 빠르기
+scale     = 0.01             # 노이즈 주파수 (1/px), 작을수록 넓게 함께 움직임
+direction = [1.0, 0.0]
+
+[types.scene.follow]         # follow에서 생략한 필드
+range     = 600.0            # 설계 px, 이 거리부터 최대 이동
+smoothing = 0.12             # 초, 0 = 즉시
+on_leave  = "center"         # center | stay
+
 [types.web]
 background  = "#000000"
 interactive = true

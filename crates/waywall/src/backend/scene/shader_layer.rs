@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::render::{
-    FitMap, GpuLayer, LayerBindings, LayerPlacement, TEXTURE_FORMAT, blend_state, upload_texture,
+    FitMap, FollowState, GpuLayer, LayerBindings, LayerPlacement, TEXTURE_FORMAT, blend_state,
+    upload_texture,
 };
 use super::{ChannelInput, ShaderLayer};
 use crate::backend::shader::{CHANNELS, Draw, ShaderRenderer, empty_texture, frame_inputs};
@@ -121,8 +122,18 @@ impl Cropper {
         Self { pipeline, layout }
     }
 
+    /// `run`에 줄 uniform 버퍼.
+    pub fn uniforms(&self, d: &wgpu::Device, label: &str) -> wgpu::Buffer {
+        d.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (CROP_WORDS * size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
     /// 원본·uniform이 바뀔 때(크기 변경)만 만든다.
-    fn bind(
+    pub fn bind(
         &self,
         d: &wgpu::Device,
         src: &wgpu::TextureView,
@@ -145,7 +156,7 @@ impl Cropper {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run(
+    pub fn run(
         &self,
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
@@ -257,6 +268,8 @@ impl GpuShaderLayer {
             sampling,
             render_scale,
             direct,
+            clip,
+            follow,
         } = *spec;
         let (format, blend_state) = if direct {
             (hdr_format, Some(blend_state(blend)))
@@ -265,7 +278,7 @@ impl GpuShaderLayer {
         };
         let renderer =
             ShaderRenderer::new(gpu, compiled, props, sampling, format, blend_state, &id)?;
-        let quad = GpuLayer::new(
+        let mut quad = GpuLayer::new(
             d,
             &id,
             LayerPlacement {
@@ -278,6 +291,8 @@ impl GpuShaderLayer {
                 lit: false,
             },
         );
+        quad.clip = clip;
+        quad.follow = follow.map(FollowState::new);
         let inputs = inputs.map(|i| {
             i.map(|i| match i {
                 ChannelInput::Image(t) => {
@@ -397,7 +412,12 @@ impl GpuShaderLayer {
             .bind(gpu, [views[0], views[1], views[2], views[3]]);
         if !self.direct {
             let output = Target::new(d, &self.id, OUTPUT_FORMAT, self.size);
-            self.quad.bind(d, b, &output.view, None);
+            let clip = self
+                .quad
+                .clip
+                .and_then(|j| src.isolated.get(&j))
+                .map(|t| &t.view);
+            self.quad.bind(d, b, &output.view, None, clip);
             self.output = Some(output);
         }
     }
@@ -415,7 +435,11 @@ impl GpuShaderLayer {
         hdr: &wgpu::TextureView,
     ) {
         let p = self.quad.parallax;
-        let top_left = map.to_render([self.rect[0] + shift[0] * p, self.rect[1] + shift[1] * p]);
+        let o = self.quad.offset();
+        let top_left = map.to_render([
+            self.rect[0] + shift[0] * p + o[0],
+            self.rect[1] + shift[1] * p + o[1],
+        ]);
         let origin = [top_left[0].round() as i32, top_left[1].round() as i32];
         let flip = self.lang == Language::Glsl;
         let mut resolution = [[0.0; 3]; CHANNELS];
