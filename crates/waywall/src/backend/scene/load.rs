@@ -290,7 +290,7 @@ pub fn load(
             .collect()
     });
     let mut scene_layers = Vec::with_capacity(defs.len());
-    for ((_, ((id, def), channels)), texture) in defs.into_iter().zip(textures) {
+    for ((old, ((id, def), channels)), texture) in defs.into_iter().zip(textures) {
         let texture = texture.transpose()?;
         scene_layers.push(match def {
             LayerDef::Image(d) => {
@@ -369,6 +369,7 @@ pub fn load(
                     lang,
                     inputs,
                     sampling,
+                    direct: d.opacity == 1.0 && !referenced.contains(&old),
                 }))
             }
         });

@@ -7,7 +7,7 @@ use waywall_proto::config::{Blend, Fit, HdrFormat, Render};
 
 use super::bloom::{BloomChain, BloomPipelines};
 use super::particles::{self, GpuParticles};
-use super::shader_layer::{Cropper, GpuShaderLayer, Target};
+use super::shader_layer::{Cropper, GpuShaderLayer, Sources, Target};
 use super::{ImageLayer, Layer, Light, SceneSpec, Texture};
 use crate::backend::shader::empty_texture;
 use crate::backend::view::FrameInfo;
@@ -357,9 +357,9 @@ impl SceneRenderer {
                                 hdr_format,
                                 &sampler,
                             )?),
-                            Layer::Shader(s) => {
-                                DrawLayer::Shader(Box::new(GpuShaderLayer::new(gpu, d, s)?))
-                            }
+                            Layer::Shader(s) => DrawLayer::Shader(Box::new(GpuShaderLayer::new(
+                                gpu, d, s, hdr_format,
+                            )?)),
                         })
                     })
                     .collect();
@@ -471,38 +471,44 @@ impl SceneRenderer {
     /// 출력 크기에 따르는 자원: shader 레이어의 결과·입력 텍스처, 레이어 단독 결과.
     fn size_resources(&mut self, gpu: &Gpu) -> Result<()> {
         let map = FitMap::new(self.fit, self.size, self.target.size);
-        let mut wanted = Vec::new();
+        let wanted: Vec<usize> = self
+            .layers
+            .iter()
+            .flat_map(|l| match l {
+                DrawLayer::Shader(s) => s.layer_inputs().collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        self.isolated = gpu
+            .scoped(|d| {
+                wanted
+                    .into_iter()
+                    .map(|j| {
+                        let name = "waywall scene isolated layer";
+                        (j, Target::new(d, name, self.hdr_format, self.target.size))
+                    })
+                    .collect()
+            })
+            .context("failed to create the layer input buffers")?;
         let bindings = LayerBindings {
             layout: &self.layer_layout,
             sampler: &self.sampler,
             flat_normal: &self.flat_normal,
             lights: &self.lights_buffer,
         };
-        for l in &mut self.layers {
-            if let DrawLayer::Shader(s) = l {
-                s.resize(gpu, map, &bindings);
-                wanted.extend(s.layer_inputs());
+        let sources = Sources {
+            below: &self.target.view,
+            isolated: &self.isolated,
+            cropper: self.cropper.as_ref(),
+        };
+        gpu.scoped(|_| {
+            for l in &mut self.layers {
+                if let DrawLayer::Shader(s) = l {
+                    s.resize(gpu, map, &bindings, &sources);
+                }
             }
-        }
-        self.isolated = gpu
-            .scoped(|d| {
-                wanted
-                    .into_iter()
-                    .map(|j| {
-                        (
-                            j,
-                            Target::new(
-                                d,
-                                "waywall scene isolated layer",
-                                self.hdr_format,
-                                self.target.size,
-                            ),
-                        )
-                    })
-                    .collect()
-            })
-            .context("failed to create the layer input buffers")?;
-        Ok(())
+        })
+        .context("failed to create the shader layer buffers")
     }
 
     /// 포인터가 움직이면 화면이 바뀔 수 있는지 (패럴랙스, 파티클 `pointer`).
@@ -610,9 +616,23 @@ impl SceneRenderer {
             }
         }
 
-        // 레이어 패스. "below"를 읽는 shader 레이어 앞에서 끊어, 그때까지 그린 장면을 잘라 입력으로 준다.
+        // 레이어 패스. "below"를 읽거나 직접 그리는 shader 레이어 앞에서 끊는다.
         let drawn = |range: std::ops::Range<usize>| {
             range.filter(|&i| self.drawn[i]).map(|i| &self.layers[i])
+        };
+        // 그릴 것이 없고 지울 것도 없으면 패스를 만들지 않는다(패스마다 CPU 비용).
+        let flush = |encoder: &mut wgpu::CommandEncoder, range: std::ops::Range<usize>, load| {
+            let mut layers = drawn(range).peekable();
+            if layers.peek().is_some() || !matches!(load, wgpu::LoadOp::Load) {
+                draw_layers(
+                    &self.pipelines,
+                    layers,
+                    encoder,
+                    &self.target.view,
+                    load,
+                    map,
+                );
+            }
         };
         let mut start = 0;
         let mut load = wgpu::LoadOp::Clear(self.clear);
@@ -620,17 +640,11 @@ impl SceneRenderer {
             let (DrawLayer::Shader(s), Some(cropper)) = (l, &self.cropper) else {
                 continue;
             };
-            if s.needs_below() {
-                draw_layers(
-                    &self.pipelines,
-                    drawn(start..k),
-                    encoder,
-                    &self.target.view,
-                    load,
-                    map,
-                );
+            if s.needs_below() || s.direct() {
+                flush(encoder, start..k, load);
                 load = wgpu::LoadOp::Load;
-                start = k;
+                // 직접 그리는 레이어는 합성 사각형이 없다.
+                start = if s.direct() { k + 1 } else { k };
             }
             for j in s.layer_inputs() {
                 if let Some(t) = self.isolated.get(&j) {
@@ -645,25 +659,11 @@ impl SceneRenderer {
                     );
                 }
             }
-            s.render(
-                gpu,
-                encoder,
-                cropper,
-                f,
-                map,
-                shift,
-                &self.target.view,
-                &self.isolated,
-            );
+            if self.drawn[k] || !s.direct() {
+                s.render(gpu, encoder, cropper, f, map, shift, &self.target.view);
+            }
         }
-        draw_layers(
-            &self.pipelines,
-            drawn(start..self.layers.len()),
-            encoder,
-            &self.target.view,
-            load,
-            map,
-        );
+        flush(encoder, start..self.layers.len(), load);
 
         if let (Some(b), Some(chain)) = (&self.post.bloom, &self.target.bloom) {
             b.render(encoder, chain);
@@ -1198,7 +1198,7 @@ impl FitMap {
     }
 
     /// 설계 영역 ∩ 렌더 영역 (px). 비어 있으면 `None`.
-    fn scissor(self) -> Option<(u32, u32, u32, u32)> {
+    pub(super) fn scissor(self) -> Option<(u32, u32, u32, u32)> {
         let a = self.to_render([0.0, 0.0]);
         let b = self.to_render(self.design);
         let clamp = |v: f64, max: f64| v.round().clamp(0.0, max) as u32;

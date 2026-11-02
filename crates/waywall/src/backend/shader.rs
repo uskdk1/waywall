@@ -13,7 +13,7 @@ use waywall_proto::config::{ChannelDefaults, ChannelFilter, ChannelWrap};
 use crate::backend::scene::Texture;
 use crate::backend::view::FrameInfo;
 use crate::config::merge;
-use crate::gpu::shadertoy::{Compiled, Inputs, Language, UniformLayout};
+use crate::gpu::shadertoy::{Compiled, Inputs, Language, Slots, UniformLayout};
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
 use crate::properties::Property;
 
@@ -109,7 +109,17 @@ pub struct ShaderRenderer {
     samplers: Vec<wgpu::Sampler>,
     bind_group: Option<wgpu::BindGroup>,
     layout: UniformLayout,
+    slots: Slots,
     props: Vec<Property>,
+}
+
+/// `ShaderRenderer::render`의 그릴 곳.
+pub struct Draw<'a> {
+    pub target: &'a wgpu::TextureView,
+    /// 이전 내용을 지울지(전부 덮는 경우) 둘지(장면 위에 블렌드).
+    pub load: wgpu::LoadOp<wgpu::Color>,
+    /// 이 영역만 그림 (px).
+    pub scissor: Option<(u32, u32, u32, u32)>,
 }
 
 impl ShaderRenderer {
@@ -119,9 +129,11 @@ impl ShaderRenderer {
         props: Vec<Property>,
         sampling: [ChannelDefaults; CHANNELS],
         format: wgpu::TextureFormat,
+        blend: Option<wgpu::BlendState>,
         name: &str,
     ) -> Result<Self> {
         let layout = compiled.layout.clone();
+        let slots = layout.slots(&props);
         let entry = compiled.entry;
         let fragment = gpu.create_module(name, compiled.module)?;
         let device = &gpu.device;
@@ -188,7 +200,7 @@ impl ShaderRenderer {
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format,
-                            blend: None,
+                            blend,
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
@@ -206,6 +218,7 @@ impl ShaderRenderer {
             samplers,
             bind_group: None,
             layout,
+            slots,
             props,
         })
     }
@@ -237,24 +250,26 @@ impl ShaderRenderer {
         &self,
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
+        draw: Draw<'_>,
         inputs: &Inputs,
         name: &str,
     ) {
         let Some(bind_group) = &self.bind_group else {
             return;
         };
-        gpu.queue
-            .write_buffer(&self.uniforms, 0, &self.layout.write(inputs, &self.props));
+        gpu.queue.write_buffer(
+            &self.uniforms,
+            0,
+            &self.layout.write(&self.slots, inputs, &self.props),
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(name),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
+                view: draw.target,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // 삼각형이 전부 덮으므로 이전 내용은 필요 없다.
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: draw.load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -263,6 +278,9 @@ impl ShaderRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some((x, y, w, h)) = draw.scissor {
+            pass.set_scissor_rect(x, y, w, h);
+        }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.draw(0..3, 0..1);
@@ -310,6 +328,7 @@ pub fn frame_inputs(
         pointer: [px, py, f32::from(u8::from(p.inside)), p.buttons as f32],
         click: [cx, cy, p.click[2], p.click[3]],
         channel_resolution,
+        origin: [0.0, 0.0],
     }
 }
 
@@ -391,7 +410,7 @@ impl ShaderBackground {
                 )
             })?);
         }
-        let mut renderer = ShaderRenderer::new(gpu, compiled, props, sampling, format, name)?;
+        let mut renderer = ShaderRenderer::new(gpu, compiled, props, sampling, format, None, name)?;
         let views: Vec<wgpu::TextureView> = textures
             .iter()
             .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
@@ -413,7 +432,13 @@ impl ShaderBackground {
         name: &str,
     ) {
         let inputs = frame_inputs(f, f.size, [0.0, 0.0], self.channel_resolution);
-        self.renderer.render(gpu, encoder, target, &inputs, name);
+        let draw = Draw {
+            target,
+            // 삼각형이 전부 덮으므로 이전 내용은 필요 없다.
+            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            scissor: None,
+        };
+        self.renderer.render(gpu, encoder, draw, &inputs, name);
     }
 }
 

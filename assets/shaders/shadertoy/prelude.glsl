@@ -14,6 +14,7 @@ layout(set = 0, binding = 0) uniform Globals {
     vec4  iPointer;
     vec4  iClick;
     vec3  iChannelResolution[4];
+    vec2  waywall_origin;   // 그리는 영역의 왼쪽 위 (렌더 타깃 px). 배경은 0
     // waywall:properties
 };
 

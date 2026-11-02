@@ -1,20 +1,23 @@
-//! 블룸: HDR 장면 → 밝은 부분만 남기며 절반씩 축소 → 작은 단계부터 키우며 더함 (docs/architecture.md#씬-렌더러).
+//! 블룸: compute 패스 하나 안에서 HDR 장면 → 밝은 부분만 남기며 절반씩 축소 → 작은 단계부터 키우며 더함
+//! (docs/architecture.md#씬-렌더러).
 //!
-//! 후처리는 가장 큰 단계(렌더 크기의 절반)를 읽어 `intensity`배로 더한다.
+//! 후처리는 가장 큰 단계(렌더 크기의 절반)의 확대 결과를 읽어 `intensity`배로 더한다.
 
-use super::shader_layer::{OUTPUT_FORMAT as LEVEL_FORMAT, Target};
-use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
+use crate::gpu::Gpu;
 
-/// `bloom/downsample.wgsl`, `bloom/upsample.wgsl`의 엔트리 (인터페이스).
-const FS_ENTRY: &str = "fs_main";
+/// `bloom/downsample.wgsl`, `bloom/upsample.wgsl`의 엔트리와 작업 그룹 크기 (인터페이스).
+const CS_ENTRY: &str = "cs_main";
+const WORKGROUP: u32 = 8;
 /// downsample.wgsl `Down`: threshold, first, 패딩 (32비트 단어 4개).
 const DOWN_WORDS: usize = 4;
+/// 단계 텍스처 포맷 (셰이더의 `texture_storage_2d<rgba16float, write>`).
+const LEVEL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// 크기와 관계없는 부분: 파이프라인과 샘플러, 축소 uniform.
 pub struct BloomPipelines {
-    down: wgpu::RenderPipeline,
+    down: wgpu::ComputePipeline,
     down_layout: wgpu::BindGroupLayout,
-    up: wgpu::RenderPipeline,
+    up: wgpu::ComputePipeline,
     up_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// 첫 단계(threshold 적용)와 나머지 단계의 uniform.
@@ -32,86 +35,66 @@ impl BloomPipelines {
         threshold: f64,
         radius: u32,
     ) -> Self {
-        let texture_entry = |binding, filterable| wgpu::BindGroupLayoutEntry {
+        let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty,
             count: None,
+        };
+        let texture = |filterable| wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        };
+        let storage = wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format: LEVEL_FORMAT,
+            view_dimension: wgpu::TextureViewDimension::D2,
         };
         let down_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("waywall bloom down"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
+                entry(
+                    0,
+                    wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
-                    count: None,
-                },
-                texture_entry(1, false),
+                ),
+                entry(1, texture(false)),
+                entry(2, storage),
             ],
         });
         let up_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("waywall bloom up"),
             entries: &[
-                texture_entry(0, true),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
+                entry(0, texture(false)),
+                entry(1, texture(true)),
+                entry(
+                    2,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+                entry(3, storage),
             ],
         });
-        let pipeline = |layout: &wgpu::BindGroupLayout, module, blend| {
+        let pipeline = |layout: &wgpu::BindGroupLayout, module| {
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("waywall bloom"),
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("waywall bloom"),
                 layout: Some(&pl),
-                vertex: wgpu::VertexState {
-                    module: &gpu.fullscreen,
-                    entry_point: Some(FULLSCREEN_ENTRY),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module,
-                    entry_point: Some(FS_ENTRY),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: LEVEL_FORMAT,
-                        blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
+                module,
+                entry_point: Some(CS_ENTRY),
+                compilation_options: Default::default(),
                 cache: None,
             })
         };
-        let additive = wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent::REPLACE,
-        };
-        let down = pipeline(&down_layout, down_module, None);
-        let up = pipeline(&up_layout, up_module, Some(additive));
+        let down = pipeline(&down_layout, down_module);
+        let up = pipeline(&up_layout, up_module);
         let uniform = |first: bool| {
             let buffer = d.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("waywall bloom down"),
@@ -145,111 +128,125 @@ impl BloomPipelines {
     /// 렌더 크기에 맞춘 단계들. `hdr`는 첫 축소의 원본.
     pub fn chain(&self, d: &wgpu::Device, hdr: &wgpu::TextureView, size: (u32, u32)) -> BloomChain {
         let sizes = level_sizes(size, self.radius);
-        let levels: Vec<Target> = sizes
+        let down: Vec<Level> = sizes.iter().map(|&s| Level::new(d, s)).collect();
+        // up[i]는 down[i]와 같은 크기. 가장 작은 단계는 확대할 것이 없어 down을 그대로 쓴다.
+        let up: Vec<Level> = sizes
             .iter()
-            .map(|&s| Target::new(d, "waywall bloom", LEVEL_FORMAT, s))
+            .take(sizes.len().saturating_sub(1))
+            .map(|&s| Level::new(d, s))
             .collect();
-        let down = levels
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let (src, uniforms) = if i == 0 {
-                    (hdr, &self.first)
-                } else {
-                    (&levels[i - 1].view, &self.rest)
-                };
-                d.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("waywall bloom down"),
-                    layout: &self.down_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: uniforms.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(src),
-                        },
-                    ],
-                })
-            })
-            .collect();
-        let up = levels
-            .iter()
-            .skip(1)
-            .map(|src| {
-                d.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("waywall bloom up"),
-                    layout: &self.up_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&src.view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                    ],
-                })
-            })
-            .collect();
-        BloomChain { levels, down, up }
+        let mut passes = Vec::with_capacity(down.len() + up.len());
+        for (i, dst) in down.iter().enumerate() {
+            let (src, uniforms) = if i == 0 {
+                (hdr, &self.first)
+            } else {
+                (&down[i - 1].view, &self.rest)
+            };
+            let group = d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("waywall bloom down"),
+                layout: &self.down_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(src),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&dst.view),
+                    },
+                ],
+            });
+            passes.push((false, group, dst.size));
+        }
+        for (i, dst) in up.iter().enumerate().rev() {
+            let small = up.get(i + 1).unwrap_or(&down[i + 1]);
+            let group = d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("waywall bloom up"),
+                layout: &self.up_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&down[i].view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&small.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&dst.view),
+                    },
+                ],
+            });
+            passes.push((true, group, dst.size));
+        }
+        BloomChain { down, up, passes }
     }
 
+    /// 축소 → 확대를 compute 패스 하나에 기록한다.
     pub fn render(&self, encoder: &mut wgpu::CommandEncoder, chain: &BloomChain) {
-        let pass = |encoder: &mut wgpu::CommandEncoder,
-                    target: &Target,
-                    load,
-                    pipeline,
-                    group: &wgpu::BindGroup| {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("waywall bloom"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(pipeline);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("waywall bloom"),
+            timestamp_writes: None,
+        });
+        for (up, group, size) in &chain.passes {
+            pass.set_pipeline(if *up { &self.up } else { &self.down });
             pass.set_bind_group(0, group, &[]);
-            pass.draw(0..3, 0..1);
-        };
-        for (target, group) in chain.levels.iter().zip(&chain.down) {
-            let clear = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
-            pass(encoder, target, clear, &self.down, group);
+            pass.dispatch_workgroups(size.0.div_ceil(WORKGROUP), size.1.div_ceil(WORKGROUP), 1);
         }
-        // up[i]는 levels[i + 1]을 읽어 levels[i]에 더한다. 작은 단계부터.
-        for (i, group) in chain.up.iter().enumerate().rev() {
-            pass(
-                encoder,
-                &chain.levels[i],
-                wgpu::LoadOp::Load,
-                &self.up,
-                group,
-            );
+    }
+}
+
+struct Level {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+}
+
+impl Level {
+    fn new(d: &wgpu::Device, size: (u32, u32)) -> Self {
+        let texture = d.create_texture(&wgpu::TextureDescriptor {
+            label: Some("waywall bloom"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: LEVEL_FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            _texture: texture,
+            view,
+            size,
         }
     }
 }
 
 pub struct BloomChain {
-    levels: Vec<Target>,
-    down: Vec<wgpu::BindGroup>,
-    up: Vec<wgpu::BindGroup>,
+    down: Vec<Level>,
+    up: Vec<Level>,
+    /// 디스패치 순서대로 (확대인지, 바인드 그룹, 출력 크기).
+    passes: Vec<(bool, wgpu::BindGroup, (u32, u32))>,
 }
 
 impl BloomChain {
-    /// 후처리가 읽는 결과 (가장 큰 단계).
+    /// 후처리가 읽는 결과: 가장 큰 단계의 확대 결과 (단계가 하나면 축소 결과).
     pub fn result(&self) -> Option<&wgpu::TextureView> {
-        self.levels.first().map(|t| &t.view)
+        self.up.first().or(self.down.first()).map(|l| &l.view)
     }
 }
 

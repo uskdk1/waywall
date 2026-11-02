@@ -56,7 +56,7 @@ pub struct GpuSpec {
 }
 
 enum Renderer {
-    Shader(ShaderBackground),
+    Shader(Box<ShaderBackground>),
     Scene(Box<SceneRenderer>),
 }
 
@@ -193,9 +193,12 @@ impl GpuView {
             .context("failed to configure the Vulkan surface")?;
 
         let renderer = match spec.renderer {
-            RendererSpec::Shader(s) => {
-                Renderer::Shader(ShaderBackground::new(gpu, *s, view_format, &spec.name)?)
-            }
+            RendererSpec::Shader(s) => Renderer::Shader(Box::new(ShaderBackground::new(
+                gpu,
+                *s,
+                view_format,
+                &spec.name,
+            )?)),
             RendererSpec::Scene(s) => Renderer::Scene(Box::new(SceneRenderer::new(
                 gpu,
                 *s,

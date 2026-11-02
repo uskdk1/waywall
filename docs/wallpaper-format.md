@@ -121,7 +121,9 @@ fn main_image(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32
 
 `g`는 waywall이 앞에 붙이는 `assets/shaders/shadertoy/prelude.wgsl`의 `var<uniform> g: Globals;` 이며 필드는 아래 표의 snake_case
 (`resolution`, `time`, `time_delta`, `frame`, `date`, `mouse`, `pointer`, `click`, 그리고 속성 `u_<이름>`)입니다.
-`frag_coord`는 WGSL 그대로 **왼쪽 위 원점**이고, `g.mouse`/`g.pointer`/`g.click`의 좌표는 GLSL과 같은 왼쪽 아래 원점입니다.
+`frag_coord`는 WGSL 그대로 **왼쪽 위 원점**이고 렌더 타깃 기준입니다. 그리는 영역 안의 좌표는 `frag_coord.xy - g.origin`입니다
+(셰이더 배경에서는 `g.origin`이 0이고, 씬 shader 레이어에서는 레이어 영역의 왼쪽 위). 배경과 레이어 양쪽에서 쓸 셰이더는 항상 빼 두면 됩니다.
+`g.mouse`/`g.pointer`/`g.click`의 좌표는 GLSL과 같은 왼쪽 아래 원점이며 그리는 영역 기준입니다.
 화면을 덮는 삼각형을 그리는 버텍스 셰이더는 `assets/shaders/fullscreen.wgsl`입니다.
 
 ### 제공 uniform
@@ -347,7 +349,8 @@ inputs = { iChannel0 = "below", iChannel1 = "textures/light_mask.png", iChannel2
 | 레이어 `id` | 이 레이어보다 **아래**에 있는 그 레이어 하나만 투명 바탕에 그린 결과. `visible = false`인 레이어도 입력으로 쓸 수 있음(화면에는 안 그림) |
 | 경로 | 이미지 파일 (배경 디렉터리 기준) |
 
-- 셰이더는 `rect`를 렌더 해상도로 옮긴 크기의 자기 HDR 텍스처에 그립니다(`iResolution` = 그 크기, `fragCoord`는 `rect` 기준).
+- 셰이더는 `rect`를 렌더 해상도로 옮긴 크기의 자기 HDR 텍스처에 그립니다(`iResolution` = 그 크기, GLSL `fragCoord`는 `rect` 기준,
+  WGSL은 `frag_coord.xy - g.origin`).
   그 결과를 image 레이어처럼 `blend`·`opacity`·`parallax`로 장면에 합성합니다.
 - 출력은 **선형, premultiplied** RGBA로 해석합니다. 1보다 큰 값은 블룸으로 번집니다. 화면에 그대로 쓰이는 셰이더 배경과 다릅니다.
 - `"below"`와 레이어 입력은 장면에서 **이 레이어의 `rect` 영역만** 잘라 낸 것이라 `uv = fragCoord / iResolution.xy`로 읽으면

@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::render::{
-    FitMap, GpuLayer, LayerBindings, LayerPlacement, TEXTURE_FORMAT, upload_texture,
+    FitMap, GpuLayer, LayerBindings, LayerPlacement, TEXTURE_FORMAT, blend_state, upload_texture,
 };
 use super::{ChannelInput, ShaderLayer};
-use crate::backend::shader::{CHANNELS, ShaderRenderer, empty_texture, frame_inputs};
+use crate::backend::shader::{CHANNELS, Draw, ShaderRenderer, empty_texture, frame_inputs};
 use crate::backend::view::FrameInfo;
 use crate::gpu::shadertoy::Language;
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
@@ -121,26 +121,14 @@ impl Cropper {
         Self { pipeline, layout }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn run(
+    /// 원본·uniform이 바뀔 때(크기 변경)만 만든다.
+    fn bind(
         &self,
-        gpu: &Gpu,
-        encoder: &mut wgpu::CommandEncoder,
+        d: &wgpu::Device,
         src: &wgpu::TextureView,
-        dst: &Target,
         uniforms: &wgpu::Buffer,
-        origin: [i32; 2],
-        flip: bool,
-    ) {
-        let words: [u32; CROP_WORDS] = [
-            origin[0] as u32,
-            origin[1] as u32,
-            u32::from(flip),
-            dst.texture.height(),
-        ];
-        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
-        gpu.queue.write_buffer(uniforms, 0, &bytes);
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+    ) -> wgpu::BindGroup {
+        d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("waywall scene input"),
             layout: &self.layout,
             entries: &[
@@ -153,7 +141,28 @@ impl Cropper {
                     resource: wgpu::BindingResource::TextureView(src),
                 },
             ],
-        });
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &Target,
+        uniforms: &wgpu::Buffer,
+        bind_group: &wgpu::BindGroup,
+        origin: [i32; 2],
+        flip: bool,
+    ) {
+        let words: [u32; CROP_WORDS] = [
+            origin[0] as u32,
+            origin[1] as u32,
+            u32::from(flip),
+            dst.texture.height(),
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+        gpu.queue.write_buffer(uniforms, 0, &bytes);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("waywall scene input"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -171,7 +180,7 @@ impl Cropper {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 }
@@ -180,8 +189,9 @@ enum Input {
     /// 잘라 낸 결과 (크기에 따라 다시 만듦).
     Crop {
         source: CropSource,
-        target: Option<Target>,
         uniforms: wgpu::Buffer,
+        /// 결과 텍스처와, 원본을 묶은 바인드 그룹.
+        bound: Option<(Target, wgpu::BindGroup)>,
     },
     Image {
         _texture: wgpu::Texture,
@@ -197,21 +207,37 @@ enum CropSource {
 }
 
 pub struct GpuShaderLayer {
+    /// 텍스처 경유일 때 결과를 합성하는 사각형. 직접 그릴 때는 위치(패럴랙스)만 쓴다.
     pub quad: GpuLayer,
     id: String,
     rect: [f64; 4],
     lang: Language,
+    /// HDR 버퍼에 직접 그리는지 (docs/architecture.md#씬-렌더러).
+    direct: bool,
     renderer: ShaderRenderer,
     inputs: [Option<Input>; CHANNELS],
+    /// 텍스처 경유일 때의 결과.
     output: Option<Target>,
-    /// 결과 텍스처 크기 (렌더 px).
+    /// 그리는 영역 크기 (렌더 px).
     size: (u32, u32),
     _empty: wgpu::Texture,
     empty_view: wgpu::TextureView,
 }
 
+/// 크기가 바뀔 때 다시 묶을 원본들.
+pub struct Sources<'a> {
+    pub below: &'a wgpu::TextureView,
+    pub isolated: &'a HashMap<usize, Target>,
+    pub cropper: Option<&'a Cropper>,
+}
+
 impl GpuShaderLayer {
-    pub fn new(gpu: &Gpu, d: &wgpu::Device, spec: Box<ShaderLayer>) -> Result<Self> {
+    pub fn new(
+        gpu: &Gpu,
+        d: &wgpu::Device,
+        spec: Box<ShaderLayer>,
+        hdr_format: wgpu::TextureFormat,
+    ) -> Result<Self> {
         let ShaderLayer {
             id,
             blend,
@@ -223,8 +249,15 @@ impl GpuShaderLayer {
             lang,
             inputs,
             sampling,
+            direct,
         } = *spec;
-        let renderer = ShaderRenderer::new(gpu, compiled, props, sampling, OUTPUT_FORMAT, &id)?;
+        let (format, blend_state) = if direct {
+            (hdr_format, Some(blend_state(blend)))
+        } else {
+            (OUTPUT_FORMAT, None)
+        };
+        let renderer =
+            ShaderRenderer::new(gpu, compiled, props, sampling, format, blend_state, &id)?;
         let quad = GpuLayer::new(
             d,
             &id,
@@ -254,13 +287,13 @@ impl GpuShaderLayer {
                         ChannelInput::Layer(j) => CropSource::Layer(j),
                         _ => CropSource::Below,
                     },
-                    target: None,
                     uniforms: d.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&id),
                         size: (CROP_WORDS * size_of::<u32>()) as u64,
                         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
+                    bound: None,
                 },
             })
         });
@@ -271,6 +304,7 @@ impl GpuShaderLayer {
             id,
             rect,
             lang,
+            direct,
             renderer,
             inputs,
             output: None,
@@ -282,6 +316,11 @@ impl GpuShaderLayer {
 
     pub fn parallax(&self) -> f64 {
         self.quad.parallax
+    }
+
+    /// HDR 버퍼에 직접 그린다 (레이어 패스를 이 앞에서 끊고, 합성 사각형은 그리지 않음).
+    pub fn direct(&self) -> bool {
+        self.direct
     }
 
     /// 레이어 패스를 이 레이어 앞에서 끊어야 하는지 (`"below"` 입력).
@@ -308,29 +347,39 @@ impl GpuShaderLayer {
         })
     }
 
-    /// 출력 크기에 맞춰 결과·입력 텍스처를 만들고 다시 묶는다.
-    pub fn resize(&mut self, gpu: &Gpu, map: FitMap, b: &LayerBindings<'_>) {
-        let size = (
+    /// 출력 크기에 맞춰 결과·입력 텍스처를 만들고 다시 묶는다. 원본(HDR 버퍼 등)도 바뀌므로 매번 다시 묶는다.
+    pub fn resize(&mut self, gpu: &Gpu, map: FitMap, b: &LayerBindings<'_>, src: &Sources<'_>) {
+        let d = &gpu.device;
+        self.size = (
             ((self.rect[2] * map.scale[0]).round() as u32).max(1),
             ((self.rect[3] * map.scale[1]).round() as u32).max(1),
         );
-        if self.output.is_some() && size == self.size {
-            return;
-        }
-        let d = &gpu.device;
-        self.size = size;
-        let output = Target::new(d, &self.id, OUTPUT_FORMAT, size);
         for input in self.inputs.iter_mut().flatten() {
-            if let Input::Crop { target, .. } = input {
-                *target = Some(Target::new(d, &self.id, OUTPUT_FORMAT, size));
-            }
+            let Input::Crop {
+                source,
+                uniforms,
+                bound,
+            } = input
+            else {
+                continue;
+            };
+            let from = match source {
+                CropSource::Below => Some(src.below),
+                CropSource::Layer(j) => src.isolated.get(j).map(|t| &t.view),
+            };
+            *bound = from.zip(src.cropper).map(|(from, cropper)| {
+                let target = Target::new(d, &self.id, OUTPUT_FORMAT, self.size);
+                let group = cropper.bind(d, from, uniforms);
+                (target, group)
+            });
         }
         let views: Vec<&wgpu::TextureView> = self
             .inputs
             .iter()
             .map(|i| match i {
                 Some(Input::Crop {
-                    target: Some(t), ..
+                    bound: Some((t, _)),
+                    ..
                 }) => &t.view,
                 Some(Input::Image { view, .. }) => view,
                 _ => &self.empty_view,
@@ -338,11 +387,14 @@ impl GpuShaderLayer {
             .collect();
         self.renderer
             .bind(gpu, [views[0], views[1], views[2], views[3]]);
-        self.quad.bind(d, b, &output.view, None);
-        self.output = Some(output);
+        if !self.direct {
+            let output = Target::new(d, &self.id, OUTPUT_FORMAT, self.size);
+            self.quad.bind(d, b, &output.view, None);
+            self.output = Some(output);
+        }
     }
 
-    /// 입력을 잘라 내고 셰이더를 결과 텍스처에 그린다. `below`: 지금까지 그린 장면, `isolated`: 레이어 단독 결과.
+    /// 입력을 잘라 내고 셰이더를 그린다. 직접 그리면 `hdr`에 블렌드, 아니면 결과 텍스처에.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
@@ -352,10 +404,8 @@ impl GpuShaderLayer {
         f: &FrameInfo<'_>,
         map: FitMap,
         shift: [f64; 2],
-        below: &wgpu::TextureView,
-        isolated: &HashMap<usize, Target>,
+        hdr: &wgpu::TextureView,
     ) {
-        let Some(output) = &self.output else { return };
         let p = self.quad.parallax;
         let top_left = map.to_render([self.rect[0] + shift[0] * p, self.rect[1] + shift[1] * p]);
         let origin = [top_left[0].round() as i32, top_left[1].round() as i32];
@@ -364,17 +414,11 @@ impl GpuShaderLayer {
         for (i, input) in self.inputs.iter().enumerate() {
             match input {
                 Some(Input::Crop {
-                    source,
-                    target: Some(target),
                     uniforms,
+                    bound: Some((target, group)),
+                    ..
                 }) => {
-                    let src = match source {
-                        CropSource::Below => Some(below),
-                        CropSource::Layer(j) => isolated.get(j).map(|t| &t.view),
-                    };
-                    if let Some(src) = src {
-                        cropper.run(gpu, encoder, src, target, uniforms, origin, flip);
-                    }
+                    cropper.run(gpu, encoder, target, uniforms, group, origin, flip);
                     resolution[i] = [self.size.0 as f32, self.size.1 as f32, 1.0];
                 }
                 Some(Input::Image { size, .. }) => {
@@ -385,8 +429,71 @@ impl GpuShaderLayer {
         }
         // rect의 왼쪽 아래 (렌더 px, 왼쪽 아래 원점).
         let bottom = f.size.1 as f32 - (origin[1] as f32 + self.size.1 as f32);
-        let inputs = frame_inputs(f, self.size, [origin[0] as f32, bottom], resolution);
-        self.renderer
-            .render(gpu, encoder, &output.view, &inputs, &self.id);
+        let mut inputs = frame_inputs(f, self.size, [origin[0] as f32, bottom], resolution);
+        let draw = if self.direct {
+            let Some(scissor) = clip_rect(origin, self.size, f.size, map.scissor()) else {
+                return;
+            };
+            inputs.origin = [origin[0] as f32, origin[1] as f32];
+            Draw {
+                target: hdr,
+                load: wgpu::LoadOp::Load,
+                scissor: Some(scissor),
+            }
+        } else {
+            let Some(output) = &self.output else { return };
+            Draw {
+                target: &output.view,
+                // 삼각형이 전부 덮으므로 이전 내용은 필요 없다.
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                scissor: None,
+            }
+        };
+        self.renderer.render(gpu, encoder, draw, &inputs, &self.id);
+    }
+}
+
+/// 렌더 타깃 안의 사각형 `origin + size`와 설계 영역 scissor의 교집합. 비면 `None`.
+fn clip_rect(
+    origin: [i32; 2],
+    size: (u32, u32),
+    target: (u32, u32),
+    design: Option<(u32, u32, u32, u32)>,
+) -> Option<(u32, u32, u32, u32)> {
+    let (dx, dy, dw, dh) = design?;
+    let x0 = i64::from(origin[0]).max(i64::from(dx));
+    let y0 = i64::from(origin[1]).max(i64::from(dy));
+    let x1 = (i64::from(origin[0]) + i64::from(size.0))
+        .min(i64::from(dx + dw))
+        .min(i64::from(target.0));
+    let y1 = (i64::from(origin[1]) + i64::from(size.1))
+        .min(i64::from(dy + dh))
+        .min(i64::from(target.1));
+    (x1 > x0 && y1 > y0).then(|| (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_scissor_clips_to_target_and_design() {
+        let full = Some((0, 0, 100, 50));
+        assert_eq!(
+            clip_rect([10, 5], (20, 10), (100, 50), full),
+            Some((10, 5, 20, 10))
+        );
+        // 패럴랙스로 밖으로 밀려남.
+        assert_eq!(
+            clip_rect([-4, -2], (100, 50), (100, 50), full),
+            Some((0, 0, 96, 48))
+        );
+        // contain 레터박스.
+        assert_eq!(
+            clip_rect([0, 0], (100, 50), (100, 50), Some((0, 10, 100, 30))),
+            Some((0, 10, 100, 30))
+        );
+        assert_eq!(clip_rect([200, 0], (10, 10), (100, 50), full), None);
+        assert_eq!(clip_rect([0, 0], (10, 10), (100, 50), None), None);
     }
 }

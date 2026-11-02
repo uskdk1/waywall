@@ -4,8 +4,6 @@
 //! uniform 블록의 레이아웃은 코드에 고정하지 않고, 파싱한 모듈에서 멤버 이름과 offset을 읽어 채운다.
 //! 그래서 프리앰블 asset을 바꿔도(멤버 순서·패딩) CPU 쪽이 따라간다.
 
-use std::collections::HashMap;
-
 use anyhow::{Context, Result, anyhow, bail};
 use naga::{AddressSpace, Module, ScalarKind, ShaderStage, Span, TypeInner, VectorSize};
 
@@ -208,10 +206,12 @@ pub struct Inputs {
     pub click: [f32; 4],
     /// 채널 픽셀 크기 (z = 1, 없는 채널은 0).
     pub channel_resolution: [[f32; 3]; 4],
+    /// 그리는 영역의 왼쪽 위 (렌더 타깃 px). 배경과 텍스처에 그리는 레이어는 0.
+    pub origin: [f32; 2],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Slot {
+pub enum Slot {
     Resolution,
     Time,
     TimeDelta,
@@ -222,6 +222,7 @@ enum Slot {
     Pointer,
     Click,
     ChannelResolution,
+    Origin,
     Property(usize),
 }
 
@@ -238,6 +239,7 @@ fn builtin_slot(name: &str) -> Option<Slot> {
         "iPointer" | "pointer" => Slot::Pointer,
         "iClick" | "click" => Slot::Click,
         "iChannelResolution" | "channel_resolution" => Slot::ChannelResolution,
+        "waywall_origin" | "origin" => Slot::Origin,
         _ => return None,
     })
 }
@@ -331,44 +333,54 @@ impl UniformLayout {
         u64::from(self.size.max(1)).next_multiple_of(16)
     }
 
-    pub fn write(&self, inputs: &Inputs, props: &[Property]) -> Vec<u8> {
-        let index: HashMap<&str, usize> = props
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.name.as_str(), i))
-            .collect();
+    /// 멤버마다 채울 값. 속성 목록은 렌더러가 사는 동안 바뀌지 않으므로 한 번만 찾는다.
+    pub fn slots(&self, props: &[Property]) -> Slots {
+        Slots(
+            self.members
+                .iter()
+                .map(|m| {
+                    builtin_slot(&m.name).or_else(|| {
+                        let name = m.name.strip_prefix(PROPERTY_PREFIX)?;
+                        props
+                            .iter()
+                            .position(|p| p.name == name)
+                            .map(Slot::Property)
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    pub fn write(&self, slots: &Slots, inputs: &Inputs, props: &[Property]) -> Vec<u8> {
         let mut buf = vec![0u8; self.buffer_size() as usize];
-        for m in &self.members {
-            let slot = builtin_slot(&m.name).or_else(|| {
-                m.name
-                    .strip_prefix(PROPERTY_PREFIX)
-                    .and_then(|n| index.get(n))
-                    .map(|&i| Slot::Property(i))
-            });
-            let Some(slot) = slot else { continue };
-            let values = slot_values(slot, inputs, props);
-            // 값은 원소마다 slot_components개씩 이어져 있다.
-            let per = values.len() / m.count.max(1) as usize;
-            let elems =
-                (0..m.count as usize).flat_map(|k| (0..m.components as usize).map(move |i| (k, i)));
-            for (k, i) in elems {
-                let Some(v) = values.get(k * per + i) else {
-                    continue;
-                };
-                let at = m.offset as usize + k * m.stride as usize + i * 4;
-                let bytes = match m.scalar {
-                    Scalar::Float => v.to_f32().to_ne_bytes(),
-                    Scalar::Int => v.to_i32().to_ne_bytes(),
-                    Scalar::Uint => (v.to_i32().max(0) as u32).to_ne_bytes(),
-                };
-                if let Some(dst) = buf.get_mut(at..at + 4) {
-                    dst.copy_from_slice(&bytes);
+        for (m, slot) in self.members.iter().zip(&slots.0) {
+            let Some(slot) = *slot else { continue };
+            // 값은 배열 원소마다 slot_components(slot)개씩 이어져 있다.
+            let per = slot_components(slot, props);
+            for k in 0..m.count as usize {
+                for i in 0..(m.components as usize).min(per) {
+                    let Some(v) = slot_value(slot, inputs, props, k * per + i) else {
+                        continue;
+                    };
+                    let at = m.offset as usize + k * m.stride as usize + i * 4;
+                    let bytes = match m.scalar {
+                        Scalar::Float => v.to_f32().to_ne_bytes(),
+                        Scalar::Int => v.to_i32().to_ne_bytes(),
+                        Scalar::Uint => (v.to_i32().max(0) as u32).to_ne_bytes(),
+                    };
+                    if let Some(dst) = buf.get_mut(at..at + 4) {
+                        dst.copy_from_slice(&bytes);
+                    }
                 }
             }
         }
         buf
     }
 }
+
+/// `UniformLayout::slots`의 결과 (멤버 순서).
+#[derive(Debug, Clone, Default)]
+pub struct Slots(Vec<Option<Slot>>);
 
 #[derive(Debug, Clone, Copy)]
 enum Num {
@@ -391,23 +403,39 @@ impl Num {
     }
 }
 
-fn slot_values(slot: Slot, x: &Inputs, props: &[Property]) -> Vec<Num> {
-    let f = |v: &[f32]| v.iter().map(|&f| Num::F(f)).collect();
+/// 슬롯 값의 원소 하나당 성분 수 (배열이면 원소마다 이만큼씩 이어짐).
+fn slot_components(slot: Slot, props: &[Property]) -> usize {
+    match slot {
+        Slot::Time | Slot::TimeDelta | Slot::Frame | Slot::FrameRate => 1,
+        Slot::Origin => 2,
+        Slot::Resolution | Slot::ChannelResolution => 3,
+        Slot::Date | Slot::Mouse | Slot::Pointer | Slot::Click => 4,
+        Slot::Property(i) => match props[i].value {
+            PropValue::Color(_) => 4,
+            _ => 1,
+        },
+    }
+}
+
+/// 슬롯 값을 이어 붙인 것의 `i`번째.
+fn slot_value(slot: Slot, x: &Inputs, props: &[Property], i: usize) -> Option<Num> {
+    let f = |v: &[f32]| v.get(i).copied().map(Num::F);
     match slot {
         Slot::Resolution => f(&x.resolution),
         Slot::Time => f(&[x.time]),
         Slot::TimeDelta => f(&[x.time_delta]),
-        Slot::Frame => vec![Num::I(x.frame)],
+        Slot::Frame => (i == 0).then_some(Num::I(x.frame)),
         Slot::FrameRate => f(&[x.frame_rate]),
         Slot::Date => f(&x.date),
         Slot::Mouse => f(&x.mouse),
         Slot::Pointer => f(&x.pointer),
         Slot::Click => f(&x.click),
         Slot::ChannelResolution => f(x.channel_resolution.as_flattened()),
-        Slot::Property(i) => match props[i].value {
-            PropValue::Float(v) => vec![Num::F(v)],
-            PropValue::Int(v) => vec![Num::I(v)],
-            PropValue::Bool(v) => vec![Num::I(i32::from(v))],
+        Slot::Origin => f(&x.origin),
+        Slot::Property(p) => match props[p].value {
+            PropValue::Float(v) => f(&[v]),
+            PropValue::Int(v) => (i == 0).then_some(Num::I(v)),
+            PropValue::Bool(v) => (i == 0).then_some(Num::I(i32::from(v))),
             PropValue::Color(c) => {
                 f(&[c.r, c.g, c.b, c.a].map(|v| f32::from(v) / f32::from(u8::MAX)))
             }
@@ -495,7 +523,7 @@ mod tests {
                 channel_resolution: [[0.0; 3], [640.0, 360.0, 1.0], [0.0; 3], [7.0, 8.0, 1.0]],
                 ..Default::default()
             };
-            let buf = c.layout.write(&inputs, &props);
+            let buf = c.layout.write(&c.layout.slots(&props), &inputs, &props);
             let at = |name: &str| {
                 c.layout
                     .members

@@ -128,6 +128,8 @@ pub struct ShaderLayer {
     pub lang: Language,
     pub inputs: [Option<ChannelInput>; CHANNELS],
     pub sampling: [ChannelDefaults; CHANNELS],
+    /// HDR 버퍼에 직접 그린다: `opacity = 1`이고 다른 레이어의 입력이 아님 (docs/architecture.md#씬-렌더러).
+    pub direct: bool,
 }
 
 /// 색은 선형 RGB × intensity. 좌표는 설계 px (docs/wallpaper-format.md#조명).

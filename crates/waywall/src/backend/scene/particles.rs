@@ -7,7 +7,7 @@ use anyhow::{Result, ensure};
 use waywall_proto::config::{EmitterShape, PointerMode};
 
 use super::ParticleLayer;
-use super::render::{FitMap, TEXTURE_FORMAT, blend_state, f32_bytes, upload_texture};
+use super::render::{FitMap, TEXTURE_FORMAT, blend_state, upload_texture};
 use crate::backend::view::FrameInfo;
 use crate::gpu::Gpu;
 
@@ -297,8 +297,7 @@ impl GpuParticles {
         };
         let v = &s.velocity;
         let t = &s.turbulence;
-        let floats = |xs: &[f64]| xs.iter().map(|&x| (x as f32).to_bits()).collect::<Vec<_>>();
-        let mut words = vec![
+        let ints = [
             spawn.start,
             spawn.emit,
             spawn.burst,
@@ -308,7 +307,7 @@ impl GpuParticles {
             self.emission.seed,
             0,
         ];
-        words.extend(floats(&[
+        let floats = [
             s.center[0],
             s.center[1],
             s.extent[0],
@@ -337,9 +336,14 @@ impl GpuParticles {
             0.0,
             0.0,
             0.0,
-        ]));
-        debug_assert_eq!(words.len(), SIM_WORDS);
-        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+        ];
+        debug_assert_eq!(ints.len() + floats.len(), SIM_WORDS);
+        // 프레임마다 쓰므로 힙 할당 없이 고정 크기 배열에 담는다.
+        let mut bytes = [0u8; SIM_WORDS * 4];
+        let words = ints.into_iter().chain(floats.map(|x| (x as f32).to_bits()));
+        for (dst, w) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+            *dst = w.to_ne_bytes();
+        }
         gpu.queue.write_buffer(&self.sim_uniforms, 0, &bytes);
 
         let scale = map.vector_to_clip([1.0, 1.0]);
@@ -349,15 +353,16 @@ impl GpuParticles {
             let k = s.emissive * s.opacity;
             [r * k, g * k, b * k, a * s.opacity]
         };
-        let mut draw = vec![
-            scale[0], scale[1], origin[0], origin[1], s.size[0], s.size[1], 0.0, 0.0,
+        let [c0, c1] = [color(0), color(1)];
+        let draw: [f64; DRAW_FLOATS] = [
+            scale[0], scale[1], origin[0], origin[1], s.size[0], s.size[1], 0.0, 0.0, c0[0], c0[1],
+            c0[2], c0[3], c1[0], c1[1], c1[2], c1[3],
         ];
-        draw.extend(color(0));
-        draw.extend(color(1));
-        let draw: Vec<f32> = draw.into_iter().map(|x| x as f32).collect();
-        debug_assert_eq!(draw.len(), DRAW_FLOATS);
-        gpu.queue
-            .write_buffer(&self.draw_uniforms, 0, &f32_bytes(&draw));
+        let mut bytes = [0u8; DRAW_FLOATS * 4];
+        for (dst, x) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(draw) {
+            *dst = (x as f32).to_ne_bytes();
+        }
+        gpu.queue.write_buffer(&self.draw_uniforms, 0, &bytes);
 
         self.emission.alive(s.rate)
     }

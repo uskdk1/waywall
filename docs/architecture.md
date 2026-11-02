@@ -141,9 +141,13 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
   레이어마다 작은 uniform 버퍼에 쓴다. 변하지 않으면 쓰지 않는다.
 - 후처리 셰이더는 `scene/post.wgsl` + `tonemap/<이름>.wgsl`을 이어 붙여 naga로 검증. 톤매핑 함수만 바꾸는 사용자 파일은 짧다.
 - swapchain은 sRGB 포맷(없으면 UNORM + sRGB 뷰 포맷)으로 만들어 인코딩을 하드웨어가 한다. 셰이더 배경의 UNORM(값 그대로)과 다르다.
-- **shader 레이어:** 셰이더 배경과 같은 컴파일 경로(`gpu/shadertoy.rs`, 같은 프리앰블·uniform). `rect`를 렌더 px로 옮긴 크기의
-  `Rgba16Float` 텍스처에 그린 뒤, 그 텍스처를 image 레이어와 같은 파이프라인(사각형 + blend)으로 합성한다. 그래서 `fragCoord`·`iResolution`이
-  배경일 때와 같고, 패럴랙스·불투명도·블렌드가 image와 같은 코드로 동작한다.
+- **shader 레이어:** 셰이더 배경과 같은 컴파일 경로(`gpu/shadertoy.rs`, 같은 프리앰블·uniform). 그리는 방법은 두 가지다.
+  - **직접:** `opacity = 1`이고 다른 레이어의 입력이 아니면, HDR 버퍼에 화면 삼각형을 그리되 scissor로 rect 영역만 남기고
+    블렌드는 파이프라인의 고정 블렌드(`blend`)로 한다. 중간 텍스처의 쓰기·읽기와 합성이 없다. 렌더 타깃 기준 좌표를 레이어 기준으로
+    바꾸는 값은 uniform의 origin(GLSL은 에필로그가 `fragCoord`에서 빼 주고, WGSL은 `g.origin`)이다. 이 레이어 앞에서 레이어 패스를 끊는다.
+  - **텍스처 경유:** 그 밖에는 `rect`를 렌더 px로 옮긴 크기의 `Rgba16Float` 텍스처에 그린 뒤(origin = 0), image 레이어와 같은
+    파이프라인(사각형 + blend)으로 합성한다. 불투명도는 셰이더 출력 전체에 곱해야 해서 고정 블렌드만으로 표현할 수 없고,
+    레이어 입력은 결과 텍스처가 있어야 하기 때문이다.
   채널 입력은 프레임마다 `scene/input.wgsl` 패스로 만든다: 원본(HDR 장면 또는 레이어 단독 텍스처)에서 이 레이어의 화면 rect를 잘라
   rect 크기의 `Rgba16Float`에 쓰고, GLSL이면 상하를 뒤집는다. 원본 포맷과 관계없이 필터링 가능한 포맷이 된다.
   `"below"`를 읽는 레이어가 있으면 레이어 패스를 그 앞에서 끊는다(같은 텍스처를 읽으며 쓸 수 없음). 레이어 id 입력은 그 레이어를
@@ -151,9 +155,11 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
 - **조명:** `scene/image.wgsl` + `scene/lighting.wgsl`. 광원 목록은 storage 버퍼 하나(앰비언트 합 + 광원 배열)이며 CPU가 프레임마다
   `"pointer"` 위치와 `flicker`를 반영해 쓴다. 레이어 uniform에 설계 좌표 축(조명 위치 계산)과 회전(노멀맵 회전)을 넣는다.
   `lit`이 아닌 레이어는 같은 셰이더에서 조명 계산을 건너뛴다.
-- **블룸:** `bloom.radius`단계의 밉 체인(`Rgba16Float`, 단계마다 절반). 첫 축소에서 `max(c − threshold, 0)`만 남기고,
-  확대 단계에서 한 단계 큰 텍스처에 더한다(additive blend). 후처리가 가장 큰 단계를 읽어 `intensity`배로 더한다.
-  `intensity = 0`이면 텍스처도 패스도 만들지 않는다.
+- **블룸:** compute 패스 하나 안의 디스패치들. 축소 체인 `down[i]`(`Rgba16Float` storage, 단계마다 절반)은 첫 단계에서
+  threshold를 넘는 만큼만 남기고, 확대 체인 `up[i] = down[i] + 텐트필터(up[i+1])`(가장 작은 단계는 `down`을 그대로 읽음)를 작은 쪽부터 만든다.
+  후처리가 `up[0]`을 읽어 `intensity`배로 더한다. `intensity = 0`이면 텍스처도 패스도 만들지 않는다.
+  처음에는 단계마다 렌더 패스(additive blend)였으나, 패스마다 드라이버가 커맨드 버퍼를 초기화하는 CPU 비용(Intel anv의 `memset`)이
+  커서 바꿨다(반딧불 씬 두 출력 180fps에서 CPU 약 19% → 측정은 로드맵).
 - **파티클:** 레이어마다 storage 버퍼 하나(파티클당 위치·속도·나이·수명 24바이트 × `max`, 0으로 초기화 = 모두 죽음).
   CPU는 프레임마다 방출 수만 정한다: `rate × dt`의 정수부(소수부는 이월) + 새 왼쪽 클릭 수 × `burst`. 고리 버퍼의
   다음 자리 `[cursor, cursor + n)`을 compute 셰이더에 알려 주면, 그 범위의 스레드는 파티클을 새로 만들고(난수 = 인덱스와

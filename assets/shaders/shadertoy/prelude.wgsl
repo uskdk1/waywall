@@ -12,6 +12,7 @@ struct Globals {
     pointer: vec4<f32>,
     click: vec4<f32>,
     channel_resolution: array<vec3<f32>, 4>,
+    origin: vec2<f32>,      // 그리는 영역의 왼쪽 위 (렌더 타깃 px). 영역 안 좌표 = frag_coord.xy - origin
     // waywall:properties
 }
 

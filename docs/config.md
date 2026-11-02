@@ -195,8 +195,8 @@ assets/
 │  ├─ scene/input.wgsl      # shader 레이어 채널 입력: 장면/레이어에서 rect 영역 잘라 내기(GLSL이면 상하 반전)
 │  ├─ scene/post.wgsl       # HDR + 블룸 → 노출 → tonemap() → vignette() → 화면. tonemap/<이름>.wgsl과 vignette.wgsl을 뒤에 붙여 컴파일
 │  ├─ tonemap/{aces,agx,reinhard,none}.wgsl   # fn tonemap(c: vec3<f32>) -> vec3<f32>. 새 파일 = 새 이름
-│  ├─ bloom/downsample.wgsl # 첫 단계에서 threshold를 넘는 부분만 남기고 해상도 절반씩
-│  ├─ bloom/upsample.wgsl   # 작은 단계부터 키워 가며 더함
+│  ├─ bloom/downsample.wgsl # compute: 첫 단계에서 threshold를 넘는 부분만 남기고 해상도 절반씩
+│  ├─ bloom/upsample.wgsl   # compute: 한 단계 작은 결과를 텐트 필터로 키워 이 단계에 더함
 │  ├─ vignette.wgsl         # fn vignette(uv: vec2<f32>, strength: f32) -> f32
 │  ├─ particles/simulate.wgsl   # compute: 방출(고리 버퍼) · 적분 · curl noise · 포인터 힘
 │  ├─ particles/render.wgsl     # 인스턴스 사각형. 뒤에 스프라이트 파일이 붙어 `fn sprite(uv) -> vec4<f32>`를 정의
