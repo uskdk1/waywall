@@ -132,7 +132,7 @@ density = 2.0
 | `render_scale` | float | `1.0` | 내부 렌더 해상도 배율. 배경의 `render_scale` 옵션과 곱해짐 |
 | `present_mode` | string | `"mailbox"` | Vulkan present 모드: `mailbox` · `fifo` · `immediate`. 지원하지 않으면 `fifo` |
 | `frame_latency` | int | `2` | swapchain이 미리 준비할 수 있는 최대 프레임 수 (작을수록 입력 지연↓) |
-| `hdr_format` | string | `"rgba16float"` | 씬 내부 HDR 버퍼 포맷: `rgba16float` · `rg11b10ufloat`(메모리 절반, 정밀도↓) · `rgba32float` |
+| `hdr_format` | string | `"rgba16float"` | 씬 내부 HDR 버퍼 포맷: `rgba16float` · `rg11b10ufloat`(메모리 절반, 정밀도↓, 알파 없음) · `rgba32float`. 뒤의 둘은 GPU 기능(`RG11B10UFLOAT_RENDERABLE`, `FLOAT32_BLENDABLE`)이 필요하며, 없으면 씬이 이유와 함께 거절됨 |
 
 톤매핑은 씬 옵션 `[types.scene.post] tonemap`입니다(작성자가 씬마다 고르고, 사용자가 적으면 모든 씬에 적용).
 

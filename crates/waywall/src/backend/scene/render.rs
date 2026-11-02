@@ -80,11 +80,22 @@ impl SceneRenderer {
         size: (u32, u32),
         name: &str,
     ) -> Result<Self> {
-        let hdr_format = match render.hdr_format {
-            HdrFormat::Rgba16float => wgpu::TextureFormat::Rgba16Float,
-            HdrFormat::Rg11b10ufloat => wgpu::TextureFormat::Rg11b10Ufloat,
-            HdrFormat::Rgba32float => wgpu::TextureFormat::Rgba32Float,
+        let (hdr_format, needs) = match render.hdr_format {
+            HdrFormat::Rgba16float => (wgpu::TextureFormat::Rgba16Float, wgpu::Features::empty()),
+            HdrFormat::Rg11b10ufloat => (
+                wgpu::TextureFormat::Rg11b10Ufloat,
+                wgpu::Features::RG11B10UFLOAT_RENDERABLE,
+            ),
+            HdrFormat::Rgba32float => (
+                wgpu::TextureFormat::Rgba32Float,
+                wgpu::Features::FLOAT32_BLENDABLE,
+            ),
         };
+        ensure!(
+            gpu.device.features().contains(needs),
+            "render.hdr_format = {:?} needs {needs:?}, which this GPU does not support",
+            render.hdr_format
+        );
         let image = gpu.create_module("scene/image.wgsl", spec.image_shader)?;
         let post = gpu.create_module("scene/post.wgsl", spec.post_shader)?;
         let max_dim = gpu.device.limits().max_texture_dimension_2d;

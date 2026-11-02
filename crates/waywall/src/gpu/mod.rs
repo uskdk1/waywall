@@ -22,6 +22,9 @@ use crate::assets::Assets;
 const FULLSCREEN_VS: &str = "shaders/fullscreen.wgsl";
 /// `fullscreen.wgsl`의 엔트리 (인터페이스).
 pub const FULLSCREEN_ENTRY: &str = "vs_main";
+/// 씬 HDR 버퍼 포맷(`render.hdr_format`) 중 기본 기능 밖의 것: rg11b10ufloat 렌더 타깃, rgba32float 블렌딩.
+pub const HDR_FEATURES: wgpu::Features =
+    wgpu::Features::RG11B10UFLOAT_RENDERABLE.union(wgpu::Features::FLOAT32_BLENDABLE);
 
 pub struct Gpu {
     instance: wgpu::Instance,
@@ -64,6 +67,8 @@ impl Gpu {
             label: Some("waywall"),
             // 상시 실행이므로 속도보다 메모리를 아낀다.
             memory_hints: wgpu::MemoryHints::MemoryUsage,
+            // render.hdr_format의 선택지가 쓰는 기능. reload로 바뀔 수 있으니 지원하면 미리 켠다.
+            required_features: adapter.features() & HDR_FEATURES,
             ..Default::default()
         }))
         .context("failed to create GPU device")?;
