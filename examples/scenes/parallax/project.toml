@@ -1,0 +1,13 @@
+[wallpaper]
+name  = "Parallax Hills"
+type  = "scene"
+entry = "scene.toml"
+
+[options]
+interactive = true
+
+[properties.moon_glow]
+type    = "float"
+default = 1.0
+min     = 0.0
+max     = 1.0

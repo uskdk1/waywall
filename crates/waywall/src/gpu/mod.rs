@@ -104,6 +104,19 @@ impl Gpu {
     }
 }
 
+/// WGSL 소스 → 검증된 naga 모듈. GPU 없이 동작하므로 배경을 고를 때(`set`) 오류를 알릴 수 있다.
+pub fn compile_wgsl(name: &str, src: &str) -> Result<naga::Module> {
+    let module = naga::front::wgsl::parse_str(src)
+        .map_err(|e| anyhow!("{name}: {}", e.emit_to_string(src)))?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .map_err(|e| anyhow!("{name}: {}", e.emit_to_string(src)))?;
+    Ok(module)
+}
+
 fn scoped<T>(device: &wgpu::Device, f: impl FnOnce(&wgpu::Device) -> T) -> Result<T> {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let value = f(device);

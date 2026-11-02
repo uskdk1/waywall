@@ -40,10 +40,12 @@ use waywall_proto::project::WallpaperKind;
 
 use crate::assets::Assets;
 use crate::backend::image::{self, Decoded};
-use crate::backend::shader::{Geometry, ShaderSpec, ShaderView};
+use crate::backend::scene;
+use crate::backend::shader::ShaderSpec;
 use crate::backend::video::{
     self, Mode as VideoMode, VideoEvent, VideoMsg, VideoParams, VideoView,
 };
+use crate::backend::view::{Geometry, GpuSpec, GpuView, RendererSpec, ViewOpts};
 use crate::config::{Layers, OutputConfig, expand_path};
 use crate::config_edit::{self, Target};
 use crate::gpu::Gpu;
@@ -142,9 +144,10 @@ enum Prepared {
         path: PathBuf,
         opts: ImageOptions,
     },
-    Shader {
+    /// 셰이더 또는 씬.
+    Gpu {
         wallpaper: Wallpaper,
-        spec: Box<ShaderSpec>,
+        spec: Box<GpuSpec>,
     },
     /// 영상 또는 움직이는 GIF.
     Video {
@@ -158,7 +161,7 @@ impl Prepared {
     fn wallpaper(&self) -> &Wallpaper {
         match self {
             Prepared::Image { wallpaper, .. }
-            | Prepared::Shader { wallpaper, .. }
+            | Prepared::Gpu { wallpaper, .. }
             | Prepared::Video { wallpaper, .. } => wallpaper,
         }
     }
@@ -444,8 +447,8 @@ impl State {
     /// 크기/스케일 변경: 배치를 즉시 갱신하고, 미리 줄인 이미지가 이제 부족하면 다시 읽는다.
     fn geometry_changed(&mut self, idx: usize) {
         self.outputs[idx].relayout();
-        if matches!(self.outputs[idx].content, Content::Shader(_)) {
-            self.shader_resized(idx);
+        if matches!(self.outputs[idx].content, Content::Gpu(_)) {
+            self.gpu_resized(idx);
             return;
         }
         let out = &self.outputs[idx];
@@ -549,11 +552,31 @@ impl State {
                     &props,
                     &wp.name,
                 )?;
-                Ok(Prepared::Shader {
-                    spec: Box::new(ShaderSpec {
-                        compiled,
-                        props,
-                        opts,
+                Ok(Prepared::Gpu {
+                    spec: Box::new(GpuSpec {
+                        renderer: RendererSpec::Shader(Box::new(ShaderSpec { compiled, props })),
+                        opts: ViewOpts {
+                            fps: opts.fps,
+                            render_scale: opts.render_scale,
+                            interactive: opts.interactive,
+                            background: opts.background,
+                        },
+                        name: wp.name.clone(),
+                    }),
+                    wallpaper: wp,
+                })
+            }
+            (WallpaperKind::Scene, Source::File(path)) => {
+                let (scene, opts) = scene::load(path, &wp, &self.layers, cfg, &self.assets())?;
+                Ok(Prepared::Gpu {
+                    spec: Box::new(GpuSpec {
+                        renderer: RendererSpec::Scene(Box::new(scene)),
+                        opts: ViewOpts {
+                            fps: opts.fps,
+                            render_scale: opts.render_scale,
+                            interactive: opts.interactive,
+                            background: opts.clear,
+                        },
                         name: wp.name.clone(),
                     }),
                     wallpaper: wp,
@@ -591,7 +614,7 @@ impl State {
         tracing::info!(output = %self.outputs[idx].name, wallpaper = %wp.name, kind = ?wp.kind, ?purpose, "loading");
         let (path, opts) = match prepared {
             Prepared::Image { path, opts, .. } => (path, opts),
-            Prepared::Shader { spec, .. } => return self.show_shader(idx, *spec, purpose),
+            Prepared::Gpu { spec, .. } => return self.show_gpu(idx, *spec, purpose),
             Prepared::Video {
                 wallpaper,
                 path,
@@ -1040,7 +1063,7 @@ impl State {
         }
     }
 
-    // ── 셰이더 ────────────────────────────────────────────────────────────
+    // ── 셰이더·씬 ─────────────────────────────────────────────────────────
 
     fn assets(&self) -> Assets {
         Assets::new(expand_path(
@@ -1049,7 +1072,7 @@ impl State {
         ))
     }
 
-    fn show_shader(&mut self, idx: usize, spec: ShaderSpec, purpose: Purpose) -> Result<()> {
+    fn show_gpu(&mut self, idx: usize, spec: GpuSpec, purpose: Purpose) -> Result<()> {
         let out = &self.outputs[idx];
         let geometry = Geometry {
             logical: out.logical.context("output not configured yet")?,
@@ -1071,7 +1094,7 @@ impl State {
         let id = self.next_view;
         self.next_view += 1;
         let paused = self.outputs[idx].is_paused();
-        let view = ShaderView::new(
+        let view = GpuView::new(
             gpu,
             surface,
             plane,
@@ -1088,19 +1111,19 @@ impl State {
             out.pending = None;
             out.loading = None;
         }
-        out.present_shader(&ctx, view)?;
+        out.present_gpu(&ctx, view)?;
         // 멈춘 상태여도 첫 장은 그린다(시간 0에 고정된 화면).
-        self.draw_shader(idx);
+        self.draw_gpu(idx);
         if purpose == Purpose::Main {
             self.settle(idx, Ok(()));
         }
         Ok(())
     }
 
-    fn draw_shader(&mut self, idx: usize) {
+    fn draw_gpu(&mut self, idx: usize) {
         let Some(gpu) = &self.gpu else { return };
         let out = &mut self.outputs[idx];
-        let Content::Shader(view) = &mut out.content else {
+        let Content::Gpu(view) = &mut out.content else {
             return;
         };
         match view.draw(gpu, &self.qh) {
@@ -1116,13 +1139,13 @@ impl State {
         }
     }
 
-    fn shader_resized(&mut self, idx: usize) {
+    fn gpu_resized(&mut self, idx: usize) {
         let Some(gpu) = &self.gpu else { return };
         let out = &mut self.outputs[idx];
         let (Some(logical), Some(physical)) = (out.logical, out.physical()) else {
             return;
         };
-        let Content::Shader(view) = &mut out.content else {
+        let Content::Gpu(view) = &mut out.content else {
             return;
         };
         if let Err(e) = view.resize(gpu, Geometry { logical, physical }) {
@@ -1131,11 +1154,11 @@ impl State {
         }
         // 새 크기는 다음 present에 반영된다. 루프가 멈춰 있으면 지금 한 장 그린다.
         if !view.waiting_frame && !view.timer_armed {
-            self.draw_shader(idx);
+            self.draw_gpu(idx);
         }
     }
 
-    /// 셰이더/영상 서브서피스의 frame 콜백: 가림 판정을 갱신하고, 셰이더는 fps 제한을 지키며 다음 프레임을 그린다.
+    /// GPU/영상 서브서피스의 frame 콜백: 가림 판정을 갱신하고, GPU 배경은 fps 제한을 지키며 다음 프레임을 그린다.
     pub fn on_frame(&mut self, surface: &WlSurface) {
         let Some(idx) = self
             .outputs
@@ -1161,15 +1184,16 @@ impl State {
             out.watch.requested(now);
         }
         let paused = out.is_paused();
-        let Content::Shader(view) = &mut out.content else {
+        let Content::Gpu(view) = &mut out.content else {
             return;
         };
         view.waiting_frame = false;
-        if paused || view.timer_armed {
+        // 다 움직인 씬은 여기서 잠든다. 포인터·크기 변경·resume이 다시 깨운다.
+        if paused || view.timer_armed || !view.wants_frames() {
             return;
         }
         let Some(at) = view.due(Instant::now()) else {
-            self.draw_shader(idx);
+            self.draw_gpu(idx);
             return;
         };
         view.timer_armed = true;
@@ -1192,7 +1216,7 @@ impl State {
         };
         let out = &mut self.outputs[idx];
         let paused = out.is_paused();
-        let Content::Shader(view) = &mut out.content else {
+        let Content::Gpu(view) = &mut out.content else {
             return;
         };
         if view.id != view_id {
@@ -1200,7 +1224,7 @@ impl State {
         }
         view.timer_armed = false;
         if !paused {
-            self.draw_shader(idx);
+            self.draw_gpu(idx);
         }
     }
 
@@ -1228,11 +1252,11 @@ impl State {
         if let Some(view) = &mut out.incoming {
             view.set_paused(paused);
         }
-        if let Content::Shader(view) = &mut out.content {
+        if let Content::Gpu(view) = &mut out.content {
             view.set_paused(paused);
             // 멈춰 있던 렌더 루프는 한 장 그려서 다시 돌린다.
             if !paused && !view.waiting_frame && !view.timer_armed {
-                self.draw_shader(idx);
+                self.draw_gpu(idx);
             }
         }
     }
@@ -1311,8 +1335,14 @@ impl State {
         let Some(idx) = self.index_by_surface(surface) else {
             return;
         };
-        if let Content::Shader(view) = &mut self.outputs[idx].content {
-            view.pointer(kind, pos);
+        let out = &mut self.outputs[idx];
+        let paused = out.is_paused();
+        if let Content::Gpu(view) = &mut out.content {
+            let redraw = view.pointer(kind, pos);
+            // 렌더 루프가 멈춰 있으면(잠든 씬) 한 장 그려서 다시 돌린다.
+            if redraw && !paused && !view.waiting_frame && !view.timer_armed {
+                self.draw_gpu(idx);
+            }
         }
     }
 
@@ -1323,10 +1353,10 @@ impl State {
             && !self
                 .outputs
                 .iter()
-                .any(|o| matches!(o.content, Content::Shader(_)))
+                .any(|o| matches!(o.content, Content::Gpu(_)))
         {
             self.gpu = None;
-            tracing::info!("GPU released (no shader outputs)");
+            tracing::info!("GPU released (no shader or scene outputs)");
         }
     }
 
@@ -1482,7 +1512,7 @@ fn status(out: &mut Output) -> OutputStatus {
         wallpaper: out.wallpaper.clone(),
         render_path: out.render_path(),
         fps: match &mut out.content {
-            Content::Shader(view) => Some(view.take_fps()),
+            Content::Gpu(view) => Some(view.take_fps()),
             Content::Video(view) => Some(view.take_fps()),
             _ => None,
         },

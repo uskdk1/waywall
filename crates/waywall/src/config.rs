@@ -194,6 +194,13 @@ impl Layers {
             .with_context(|| format!("invalid options for {key} wallpaper"))
     }
 
+    /// 사용자가 직접 적은 `[types.<K>.<section>]`. 씬 레이어 필드처럼 항목마다 작성자 값 위에 다시 얹는 값.
+    pub fn user_type_section(&self, kind: WallpaperKind, section: &str) -> Option<&Table> {
+        types_table(&self.user, kind.key())?
+            .get(section)?
+            .as_table()
+    }
+
     /// 전역 스키마와 모든 출력 섹션을 미리 검사해서, 오타를 시작 시점에 알린다.
     fn validate(&self) -> Result<()> {
         let global = self.global()?;

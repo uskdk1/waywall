@@ -1,0 +1,43 @@
+# M6a 예제: image 레이어 + 패럴랙스 (docs/wallpaper-format.md#씬-배경).
+# 커서를 움직이면 가까운 레이어일수록 많이 움직이고, 멈추면 렌더링도 멈춘다.
+
+[scene]
+width  = 1920
+height = 1080
+fit    = "cover"
+clear  = "#0b1026"
+
+[[layer]]
+type     = "image"
+id       = "sky"
+texture  = "textures/sky.png"       # 480×270 그라디언트를 늘려 씀
+scale    = 4.2                      # 2016×1134: 패럴랙스로 움직여도 가장자리가 보이지 않게
+parallax = 0.01
+
+[[layer]]
+type     = "image"
+id       = "moon"
+texture  = "textures/moon.png"
+position = [1400, 300]
+blend    = "add"
+opacity  = "$moon_glow"
+parallax = 0.015
+
+[[layer]]
+type     = "image"
+id       = "far"
+texture  = "textures/far.png"
+position = [960, 790]
+scale    = 2.2
+parallax = 0.03
+
+[[layer]]
+type     = "image"
+id       = "near"
+texture  = "textures/near.png"
+position = [960, 841]
+scale    = 2.3
+parallax = 0.06
+
+[post]
+tonemap = "none"                    # 그림 색 그대로

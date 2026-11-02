@@ -163,6 +163,35 @@ fn main_image(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32
   사용자가 `[types.scene.post] bloom`을 적으면 모든 씬의 블룸이 그 값을 씁니다.
 - 좌표계는 `[scene]`의 설계 해상도 기준 픽셀, **왼쪽 위 원점**. 출력 크기에는 `fit`으로 맞춥니다.
 - `"$이름"` 문자열은 `project.toml` properties 값으로 치환됩니다(숫자·색 필드에 사용 가능).
+  값 전체가 `"$이름"`인 문자열만 치환하고, 정의되지 않은 속성 이름은 오류입니다. `bool` 속성은 `visible` 같은 bool 필드에 씁니다.
+- 움직일 것이 없으면 잠듭니다. 패럴랙스가 멈추고 시간에 따라 변하는 레이어(파티클, shader 레이어 등)가 없으면
+  frame 콜백을 더 요청하지 않아 정적 이미지처럼 비용이 0이 되고, 포인터가 움직이면 다시 그립니다.
+
+### 색과 알파
+
+- 텍스처와 색 값(`clear`, 파티클 `color` 등)은 **sRGB**로 해석해 선형 값으로 바꾼 뒤 HDR 버퍼에서 계산합니다.
+- 텍스처는 읽을 때 알파를 곱해 둡니다(premultiplied). 투명한 가장자리가 확대·회전에서 어둡게 번지지 않습니다.
+- 톤매핑 결과는 sRGB로 인코딩해 화면에 씁니다. 셰이더 배경(출력값 그대로)과 달리, 씬의 이미지 레이어는
+  원본 그림과 같은 색으로 보입니다(노출 1.0, `tonemap = "none"` 기준).
+- 블렌드 모드(premultiplied 기준, `s` = 레이어, `d` = 아래 장면, `a` = 레이어 알파 × `opacity`):
+
+| `blend` | 결과 |
+|---|---|
+| `normal` | `s + d × (1 − a)` |
+| `add` | `s + d` |
+| `multiply` | `s × d + d × (1 − a)` |
+| `screen` | `s + d × (1 − s)` |
+
+### `[scene]`
+
+| 키 | 설명 |
+|---|---|
+| `width`, `height` | 설계 해상도(px). 필수. 레이어 좌표의 기준 |
+| `fit` | 설계 영역을 출력에 맞추는 방식: `cover`(잘라서 채움) · `contain`(전부 보이게, 남는 곳은 `clear` 색) · `fill`(늘림) |
+| `clear` | 레이어 아래 바탕색. 첫 프레임 전에도 이 색이 보임 |
+
+`fit`과 `clear`는 배경 옵션이라 사용자 `[types.scene]`·출력 설정이 이깁니다. `contain`이면 설계 영역 밖(레터박스)에는
+레이어를 그리지 않습니다. `fps`·`render_scale`·`interactive`는 `project.toml`의 `[options]`에 둡니다.
 
 ### 예시
 
@@ -239,14 +268,16 @@ vignette = 0.35
 
 ### 레이어 공통 필드
 
-생략하면 `defaults.toml` 값을 쓰고, 사용자 `[types.scene]`에 같은 필드가 있으면 그 값이 우선합니다.
+생략하면 `defaults.toml`의 `[types.scene.layer]` 값을 쓰고, 사용자 `[types.scene.layer]`에 같은 필드가 있으면
+그 값이 모든 레이어에 우선합니다(예: `parallax = 0.0`으로 모든 씬의 패럴랙스 끄기). 타입별 필드는
+`[types.scene.<레이어 타입>]`(예: `[types.scene.image]`)이 같은 역할을 합니다. 모르는 필드는 오류입니다.
 
 | 필드 | 설명 |
 |---|---|
-| `id` | 고유 이름 (로그/오류 표시용) |
-| `blend` | `normal` · `add` · `multiply` · `screen` |
-| `opacity` | 불투명도 |
-| `parallax` | 포인터가 화면 중심에서 벗어난 만큼 반대로 이동하는 비율 |
+| `id` | 고유 이름 (로그/오류 표시용, 다른 레이어가 참조할 때). 생략하면 `layer<번호>`(0부터) |
+| `blend` | `normal` · `add` · `multiply` · `screen` ([색과 알파](#색과-알파)) |
+| `opacity` | 불투명도 (0–1) |
+| `parallax` | 포인터가 화면 중심에서 벗어난 만큼 반대로 이동하는 비율 ([패럴랙스](#패럴랙스)) |
 | `visible` | 표시 여부. `"$속성"`으로 토글 가능 |
 | `clip` | 다른 레이어 `id`. 그 레이어가 불투명한(알파 > 0) 곳에만 그림. 예: 눈동자를 흰자 안에만 |
 | `follow` | 포인터 쪽으로 제한된 거리만큼 움직임 ([포인터 따라가기](#포인터-따라가기-follow)) |
@@ -254,7 +285,17 @@ vignette = 0.35
 
 ### 레이어 타입
 
-**image** — `texture`, `position`, `scale`(숫자 또는 `[x, y]`), `rotation`(도), `normal_map`, `lit`
+**image**
+
+| 필드 | 설명 |
+|---|---|
+| `texture` | 이미지 파일 (배경 디렉터리 기준). 필수. `png` `jpg` `webp` `bmp` |
+| `position` | 이미지 중심의 좌표 `[x, y]`. 생략하면 설계 영역 중앙 |
+| `scale` | 숫자 또는 `[x, y]`. 화면 크기 = 텍스처 픽셀 크기 × `scale` (설계 px) |
+| `rotation` | 중심 기준 회전(도, 시계 방향) |
+| `normal_map`, `lit` | 조명 ([조명 타입](#조명-타입)) |
+
+`scale`·`rotation`의 내장값은 `[types.scene.image]`에 있습니다.
 
 **shader** — `source`(GLSL/WGSL), `rect`(`[x, y, w, h]`, 기본 전체), `inputs`. 셰이더 배경과 같은 uniform 사용.
 `inputs`는 `iChannel0`~`iChannel3`에 넣을 텍스처입니다.
@@ -299,6 +340,26 @@ GLSL에서는 Shadertoy처럼 `texture(iChannel0, uv)`와 `iChannelResolution[n]
 
 조명은 `lit = true`인 image 레이어(노멀맵이 있으면 입체감 포함)에 적용됩니다. 파티클은 `emissive`로
 스스로 빛나며 블룸으로 번집니다.
+
+### 패럴랙스
+
+포인터가 배경 위에 있으면 레이어를 포인터 반대쪽으로 옮겨 깊이감을 냅니다. `parallax`가 클수록 가까운 레이어처럼 많이 움직입니다.
+
+```
+이동량 = −(포인터 − 설계 영역 중심) × parallax      (설계 px)
+```
+
+- 포인터가 배경 밖으로 나가면 이동량의 목표가 0(제자리)이 됩니다.
+- 이동은 목표를 향해 지수적으로 따라갑니다. 시간 상수는 `[types.scene] pointer_smoothing`(초, `0`이면 즉시)이며
+  목표와의 차이가 `[types.scene] settle_px`(출력 픽셀)보다 작아지면 멈추고 잠듭니다.
+- 레이어가 움직여도 빈 곳이 보이지 않도록 `scale`을 1보다 조금 크게 두세요
+  (가장자리에서 이동량은 `설계 폭/2 × parallax`).
+
+### 구현 상태
+
+M6a에서는 `image` 레이어, 패럴랙스, `[post]`의 `exposure`·`tonemap`까지 동작합니다. 아직 없는 기능을 쓰면
+배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다: `particles`(M6b), `shader` 레이어 · `[[light]]` ·
+`normal_map` · `lit`(M6c), `clip` · `follow` · `effects`(M6d). `[post]`의 `bloom`·`vignette`는 값 검사만 하고 M6c부터 적용됩니다.
 
 ### 레이어 효과 (`effects`)
 

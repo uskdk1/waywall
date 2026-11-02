@@ -34,6 +34,31 @@ impl Color {
             (a * u32::MAX as f64).round() as u32,
         ]
     }
+
+    /// 선형 RGB(sRGB 전달 함수를 푼 값), premultiplied. 씬 HDR 버퍼용.
+    pub fn to_linear_premultiplied(self) -> [f64; 4] {
+        let a = self.a as f64 / 255.0;
+        let ch = |c: u8| srgb_to_linear(c as f64 / 255.0) * a;
+        [ch(self.r), ch(self.g), ch(self.b), a]
+    }
+}
+
+/// sRGB 전달 함수의 역 (IEC 61966-2-1).
+pub fn srgb_to_linear(c: f64) -> f64 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// sRGB 전달 함수 (IEC 61966-2-1).
+pub fn linear_to_srgb(c: f64) -> f64 {
+    if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 impl FromStr for Color {

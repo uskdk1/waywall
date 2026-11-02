@@ -21,8 +21,7 @@ max_fps      = 0             # shader/scene fps 상한. 0 = 상한 없음(모니
 render_scale = 1.0           # 배경의 render_scale 옵션과 곱해짐
 present_mode = "mailbox"     # mailbox | fifo | immediate (지원 안 되면 fifo)
 frame_latency = 2
-tonemap      = "aces"        # assets/shaders/tonemap/<이름>.wgsl
-hdr_format   = "rgba16float"
+hdr_format   = "rgba16float" # rgba16float | rg11b10ufloat | rgba32float
 
 [visibility]
 frame_timeout_ms = 1500
@@ -79,10 +78,12 @@ render_scale = 1.0
 interactive  = true
 fit          = "cover"
 clear        = "#000000"
+pointer_smoothing = 0.15     # 패럴랙스가 포인터를 따라가는 시간 상수(초). 0 = 즉시
+settle_px         = 0.25     # 목표와의 차이가 이보다 작으면(출력 px) 멈추고 잠듦
 
 [types.scene.post]
 exposure = 1.0
-tonemap  = "aces"
+tonemap  = "aces"            # assets/shaders/tonemap/<이름>.wgsl
 bloom    = { threshold = 1.0, intensity = 0.5, radius = 4 }
 vignette = 0.0
 
@@ -91,6 +92,10 @@ blend    = "normal"          # normal | add | multiply | screen
 opacity  = 1.0
 parallax = 0.0
 visible  = true
+
+[types.scene.image]
+scale    = 1.0               # 숫자 또는 [x, y]
+rotation = 0.0               # 도, 시계 방향
 
 [types.scene.particles]
 sprite   = "sprites/soft-circle.wgsl"

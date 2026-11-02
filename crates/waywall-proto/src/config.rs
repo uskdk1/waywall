@@ -67,8 +67,16 @@ pub struct Render {
     pub render_scale: f64,
     pub present_mode: PresentMode,
     pub frame_latency: u32,
-    pub tonemap: String,
-    pub hdr_format: String,
+    pub hdr_format: HdrFormat,
+}
+
+/// 씬 내부 HDR 버퍼 포맷.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HdrFormat {
+    Rgba16float,
+    Rg11b10ufloat,
+    Rgba32float,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,8 +206,14 @@ pub struct SceneOptions {
     pub interactive: bool,
     pub fit: Fit,
     pub clear: Color,
+    /// 패럴랙스가 포인터를 따라가는 시간 상수(초).
+    pub pointer_smoothing: f64,
+    /// 목표와의 차이가 이보다 작으면(출력 px) 움직임을 멈춘다.
+    pub settle_px: f64,
     pub post: ScenePost,
+    /// 레이어 필드의 내장값/사용자 값. 레이어마다 병합하는 쪽은 데몬의 씬 로더.
     pub layer: SceneLayerDefaults,
+    pub image: SceneImageDefaults,
     pub particles: SceneParticleDefaults,
     pub light: SceneLightDefaults,
 }
@@ -228,6 +242,30 @@ pub struct SceneLayerDefaults {
     pub opacity: f64,
     pub parallax: f64,
     pub visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SceneImageDefaults {
+    pub scale: Scale,
+    pub rotation: f64,
+}
+
+/// 숫자 하나(가로세로 같음) 또는 `[x, y]`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Scale {
+    Uniform(f64),
+    Xy([f64; 2]),
+}
+
+impl Scale {
+    pub fn xy(self) -> [f64; 2] {
+        match self {
+            Scale::Uniform(s) => [s, s],
+            Scale::Xy(xy) => xy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

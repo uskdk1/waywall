@@ -28,8 +28,8 @@ use waywall_proto::ipc::{RenderPath, WallpaperInfo};
 
 use super::globals::{Globals, NoEvents, PixelBuffer};
 use crate::backend::image::{Decoded, Request};
-use crate::backend::shader::ShaderView;
 use crate::backend::video::VideoView;
+use crate::backend::view::GpuView;
 use crate::config::OutputConfig;
 use crate::daemon::State;
 use crate::fit::place;
@@ -64,7 +64,7 @@ pub enum Content {
     Nothing,
     Color,
     Image(ShownImage),
-    Shader(Box<ShaderView>),
+    Gpu(Box<GpuView>),
     Video(Box<VideoView>),
 }
 
@@ -197,7 +197,7 @@ impl Output {
             Content::Nothing => None,
             Content::Color => Some(RenderPath::Solid),
             Content::Image(_) => Some(RenderPath::Shm),
-            Content::Shader(_) => Some(RenderPath::Gpu),
+            Content::Gpu(_) => Some(RenderPath::Gpu),
             Content::Video(v) => Some(v.mode.render_path()),
         }
     }
@@ -216,7 +216,7 @@ impl Output {
     /// 계속 갱신되는 내용(셰이더, 영상)의 서브서피스. frame 콜백 감시 대상.
     pub fn live_surface(&self) -> Option<&WlSurface> {
         match &self.content {
-            Content::Shader(v) => Some(&v.plane.surface),
+            Content::Gpu(v) => Some(&v.plane.surface),
             Content::Video(v) => Some(&v.plane.surface),
             _ => None,
         }
@@ -283,13 +283,13 @@ impl Output {
     }
 
     /// GPU 서브서피스가 준비된 셰이더로 바꾼다. 첫 프레임 전에는 부모의 `background` 색이 보인다.
-    pub fn present_shader(&mut self, ctx: &Ctx<'_>, view: ShaderView) -> Result<()> {
+    pub fn present_gpu(&mut self, ctx: &Ctx<'_>, view: GpuView) -> Result<()> {
         let old_solid = self.set_solid(ctx, view.opts.background)?;
         let old_plane = self.plane.take();
         set_input(ctx, self.surface(), view.opts.interactive)?;
         self.surface().commit();
         drop((old_solid, old_plane));
-        self.content = Content::Shader(Box::new(view));
+        self.content = Content::Gpu(Box::new(view));
         self.content_changed();
         Ok(())
     }

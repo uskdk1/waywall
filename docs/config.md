@@ -62,7 +62,6 @@ pause_when = "fullscreen"
 [render]
 gpu     = "low-power"
 max_fps = 60                          # 배터리를 아끼려고 모든 모니터를 60fps로 제한 (기본 0 = 주사율)
-tonemap = "agx"
 
 [cursor]
 shape = "crosshair"
@@ -76,6 +75,7 @@ fit = "contain"
 background = "#101018"                # 레터박스 색
 
 [types.scene.post]
+tonemap = "agx"                       # 모든 씬의 톤매핑
 bloom = { threshold = 0.9, intensity = 0.8, radius = 6 }
 
 [default]
@@ -132,8 +132,9 @@ density = 2.0
 | `render_scale` | float | `1.0` | 내부 렌더 해상도 배율. 배경의 `render_scale` 옵션과 곱해짐 |
 | `present_mode` | string | `"mailbox"` | Vulkan present 모드: `mailbox` · `fifo` · `immediate`. 지원하지 않으면 `fifo` |
 | `frame_latency` | int | `2` | swapchain이 미리 준비할 수 있는 최대 프레임 수 (작을수록 입력 지연↓) |
-| `tonemap` | string | `"aces"` | `assets/shaders/tonemap/<이름>.wgsl` 선택. 사용자 assets에 파일을 추가하면 새 이름 사용 가능 |
-| `hdr_format` | string | `"rgba16float"` | 씬 내부 HDR 버퍼 포맷 |
+| `hdr_format` | string | `"rgba16float"` | 씬 내부 HDR 버퍼 포맷: `rgba16float` · `rg11b10ufloat`(메모리 절반, 정밀도↓) · `rgba32float` |
+
+톤매핑은 씬 옵션 `[types.scene.post] tonemap`입니다(작성자가 씬마다 고르고, 사용자가 적으면 모든 씬에 적용).
 
 ### `[visibility]`
 
@@ -189,8 +190,9 @@ assets/
 ├─ defaults.toml
 ├─ shaders/
 │  ├─ fullscreen.wgsl       # 화면을 덮는 삼각형 버텍스 셰이더 (셰이더 배경, 후처리 패스)
-│  ├─ fit.wgsl              # 이미지/텍스처 crop·scale
-│  ├─ tonemap/{aces,agx,reinhard,none}.wgsl
+│  ├─ scene/image.wgsl      # 씬 image 레이어 (사각형 + 텍스처)
+│  ├─ scene/post.wgsl       # HDR → 노출 → tonemap() → 화면. tonemap/<이름>.wgsl을 뒤에 붙여 컴파일
+│  ├─ tonemap/{aces,agx,reinhard,none}.wgsl   # fn tonemap(c: vec3<f32>) -> vec3<f32>. 새 파일 = 새 이름
 │  ├─ bloom/{downsample,upsample}.wgsl
 │  ├─ vignette.wgsl
 │  ├─ lighting.wgsl         # 노멀맵 조명
@@ -241,6 +243,18 @@ render_scale = 1.0
 interactive = true
 clear = "#000000"
 fit = "cover"
+pointer_smoothing = 0.15   # 패럴랙스가 포인터를 따라가는 시간 상수(초). 0 = 즉시
+settle_px = 0.25           # 목표와의 차이가 이보다 작으면(출력 px) 멈추고 잠듦
+
+[types.scene.layer]        # 레이어 공통 필드 (사용자가 적으면 scene.toml 값보다 우선)
+blend = "normal"
+opacity = 1.0
+parallax = 0.0
+visible = true
+
+[types.scene.image]        # image 레이어 필드
+scale = 1.0
+rotation = 0.0
 
 [types.scene.post]
 exposure = 1.0

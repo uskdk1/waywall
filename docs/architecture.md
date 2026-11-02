@@ -120,7 +120,27 @@ playbin3 (file:// URI)
   확대는 컴포지터가 하므로 업스케일 패스가 필요 없음
 - 셰이더 컴파일(naga 파싱·검증, 파이프라인 생성)은 메인 스레드에서 동기적으로 함. 오류는 `set` 응답과 `list`에 표시
 
-씬 렌더러 세부는 [wallpaper-format.md](wallpaper-format.md#씬-배경).
+shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuView`(`backend/view.rs`) 하나로 공유하고,
+"한 장 그리기"만 렌더러(`Shadertoy` / `Scene`)가 다릅니다.
+
+### 씬 렌더러
+형식은 [wallpaper-format.md](wallpaper-format.md#씬-배경).
+
+```
+ 레이어 패스 (HDR 텍스처, render.hdr_format, 렌더 크기)        후처리 패스 (swapchain의 sRGB 뷰)
+ clear(선형 clear 색) → image 레이어마다 사각형 1개 draw  ──▶  전체 삼각형: 노출 × HDR → tonemap() → sRGB 인코딩
+                       (blend 모드별 파이프라인, contain이면 설계 영역 scissor)
+```
+
+- **로드** (`set` 처리 중, 메인 스레드): `scene.toml` 파싱 → `"$속성"` 치환 → 레이어마다 defaults/작성자/사용자 계층 병합 후
+  엄격한 스키마로 검사 → 텍스처 디코딩(텍스처마다 스레드 하나로 병렬, 끝날 때까지 기다림) → 선형 공간에서 알파를 곱해
+  `Rgba8UnormSrgb`로 다시 인코딩. GPU 업로드와 파이프라인 생성은 출력마다.
+- 블렌드 모드마다 image 파이프라인 하나(`scene/image.wgsl`, 고정 블렌드 상태). 레이어 변환(설계 px → clip)은 CPU가 계산해
+  레이어마다 작은 uniform 버퍼에 쓴다. 변하지 않으면 쓰지 않는다.
+- 후처리 셰이더는 `scene/post.wgsl` + `tonemap/<이름>.wgsl`을 이어 붙여 naga로 검증. 톤매핑 함수만 바꾸는 사용자 파일은 짧다.
+- swapchain은 sRGB 포맷(없으면 UNORM + sRGB 뷰 포맷)으로 만들어 인코딩을 하드웨어가 한다. 셰이더 배경의 UNORM(값 그대로)과 다르다.
+- **잠들기:** `draw`가 "아직 움직이는 중"(패럴랙스가 목표에 도달하지 않음)을 돌려줄 때만 다음 frame 콜백에서 다시 그린다.
+  아니면 렌더 루프를 멈추고, 포인터 이벤트·크기 변경·`reload`에서만 한 장 그린다. 정적인 씬은 표시 후 비용 0.
 
 ## 데몬 모듈
 
@@ -141,8 +161,9 @@ crates/waywall/src/
 │  ├─ mod.rs          # trait Backend
 │  ├─ image.rs
 │  ├─ video.rs        # GStreamer 파이프라인, 샘플 → 버퍼
-│  ├─ shader.rs
-│  ├─ scene/          # 씬 로더, 렌더 그래프, 파티클(compute), 조명, 블룸
+│  ├─ view.rs         # GpuView: wgpu surface, frame 콜백 페이싱, 시계, 포인터 (shader·scene 공유)
+│  ├─ shader.rs       # Shadertoy 렌더러
+│  ├─ scene/          # 씬 로더(load.rs), 렌더러(render.rs). 이후 파티클(compute), 조명, 블룸
 │  └─ web.rs          # 헬퍼 프로세스 관리 프록시
 ├─ visibility/
 │  ├─ mod.rs          # 사유 합성
