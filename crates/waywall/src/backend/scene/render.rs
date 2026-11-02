@@ -1,9 +1,10 @@
-//! 씬 렌더러: HDR 레이어 패스 + 후처리(노출·톤매핑) 패스 (docs/architecture.md#씬-렌더러).
+//! 씬 렌더러: 파티클 compute 패스 + HDR 레이어 패스 + 후처리(노출·톤매핑) 패스 (docs/architecture.md#씬-렌더러).
 
 use anyhow::{Context, Result, ensure};
 use waywall_proto::config::{Blend, Fit, HdrFormat, Render};
 
-use super::{ImageLayer, SceneSpec};
+use super::particles::{self, GpuParticles};
+use super::{ImageLayer, Layer, SceneSpec, Texture};
 use crate::backend::view::FrameInfo;
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
 
@@ -23,15 +24,29 @@ pub struct SceneRenderer {
     pointer_smoothing: f64,
     settle_px: f64,
     hdr_format: wgpu::TextureFormat,
-    /// `BLENDS` 순서. 쓰는 블렌드만 만든다.
+    /// image 레이어용, `BLENDS` 순서. 쓰는 블렌드만 만든다.
     pipelines: [Option<wgpu::RenderPipeline>; BLENDS.len()],
-    layers: Vec<GpuLayer>,
+    layers: Vec<DrawLayer>,
     post_pipeline: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
     post_uniforms: wgpu::Buffer,
     target: HdrTarget,
     max_parallax: f64,
     parallax: Parallax,
+}
+
+enum DrawLayer {
+    Image(GpuLayer),
+    Particles(GpuParticles),
+}
+
+impl DrawLayer {
+    fn parallax(&self) -> f64 {
+        match self {
+            DrawLayer::Image(l) => l.parallax,
+            DrawLayer::Particles(p) => p.parallax(),
+        }
+    }
 }
 
 struct GpuLayer {
@@ -74,14 +89,25 @@ impl SceneRenderer {
         let post = gpu.create_module("scene/post.wgsl", spec.post_shader)?;
         let max_dim = gpu.device.limits().max_texture_dimension_2d;
         for l in &spec.layers {
-            ensure!(
-                l.texture.width <= max_dim && l.texture.height <= max_dim,
-                "layer `{}`: texture {}x{} is larger than the GPU limit {max_dim}",
-                l.id,
-                l.texture.width,
-                l.texture.height
-            );
+            if let Some(t) = l.texture() {
+                ensure!(
+                    t.width <= max_dim && t.height <= max_dim,
+                    "layer `{}`: texture {}x{} is larger than the GPU limit {max_dim}",
+                    l.id(),
+                    t.width,
+                    t.height
+                );
+            }
+            if let Layer::Particles(p) = l {
+                particles::check_limits(gpu, p)?;
+            }
         }
+        let simulate = spec
+            .layers
+            .iter()
+            .any(|l| matches!(l, Layer::Particles(_)))
+            .then(|| gpu.create_module("particles/simulate.wgsl", spec.simulate_shader))
+            .transpose()?;
 
         let uniform_entry = |binding, visibility| wgpu::BindGroupLayoutEntry {
             binding,
@@ -137,36 +163,39 @@ impl SceneRenderer {
                     immediate_size: 0,
                 });
                 let pipelines = BLENDS.map(|b| {
-                    spec.layers.iter().any(|l| l.blend == b).then(|| {
-                        d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                            label: Some(name),
-                            layout: Some(&layer_pl),
-                            vertex: wgpu::VertexState {
-                                module: &image,
-                                entry_point: Some(VS_ENTRY),
-                                compilation_options: Default::default(),
-                                buffers: &[],
-                            },
-                            primitive: wgpu::PrimitiveState {
-                                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                                ..Default::default()
-                            },
-                            depth_stencil: None,
-                            multisample: wgpu::MultisampleState::default(),
-                            fragment: Some(wgpu::FragmentState {
-                                module: &image,
-                                entry_point: Some(FS_ENTRY),
-                                compilation_options: Default::default(),
-                                targets: &[Some(wgpu::ColorTargetState {
-                                    format: hdr_format,
-                                    blend: Some(blend_state(b)),
-                                    write_mask: wgpu::ColorWrites::ALL,
-                                })],
-                            }),
-                            multiview_mask: None,
-                            cache: None,
+                    spec.layers
+                        .iter()
+                        .any(|l| matches!(l, Layer::Image(i) if i.blend == b))
+                        .then(|| {
+                            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                                label: Some(name),
+                                layout: Some(&layer_pl),
+                                vertex: wgpu::VertexState {
+                                    module: &image,
+                                    entry_point: Some(VS_ENTRY),
+                                    compilation_options: Default::default(),
+                                    buffers: &[],
+                                },
+                                primitive: wgpu::PrimitiveState {
+                                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                                    ..Default::default()
+                                },
+                                depth_stencil: None,
+                                multisample: wgpu::MultisampleState::default(),
+                                fragment: Some(wgpu::FragmentState {
+                                    module: &image,
+                                    entry_point: Some(FS_ENTRY),
+                                    compilation_options: Default::default(),
+                                    targets: &[Some(wgpu::ColorTargetState {
+                                        format: hdr_format,
+                                        blend: Some(blend_state(b)),
+                                        write_mask: wgpu::ColorWrites::ALL,
+                                    })],
+                                }),
+                                multiview_mask: None,
+                                cache: None,
+                            })
                         })
-                    })
                 });
                 let post_pipeline = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(name),
@@ -199,15 +228,31 @@ impl SceneRenderer {
                     min_filter: wgpu::FilterMode::Linear,
                     ..Default::default()
                 });
-                let layers: Vec<GpuLayer> = spec
+                let layers: Result<Vec<DrawLayer>> = spec
                     .layers
-                    .iter()
-                    .map(|l| upload_layer(gpu, d, &layer_layout, &sampler, l))
+                    .into_iter()
+                    .map(|l| {
+                        Ok(match l {
+                            Layer::Image(l) => {
+                                DrawLayer::Image(upload_layer(gpu, d, &layer_layout, &sampler, &l))
+                            }
+                            Layer::Particles(p) => DrawLayer::Particles(GpuParticles::new(
+                                gpu,
+                                d,
+                                p,
+                                simulate.as_ref().context("simulate shader")?,
+                                hdr_format,
+                                &sampler,
+                            )?),
+                        })
+                    })
                     .collect();
                 (pipelines, post_pipeline, post_layout, layers)
             })
             .with_context(|| format!("{name}: failed to create the scene pipelines"))?;
         let (pipelines, post_pipeline, post_layout, layers) = built;
+        let layers =
+            layers.with_context(|| format!("{name}: failed to create the particle layers"))?;
 
         let post_uniforms = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("waywall scene post"),
@@ -221,7 +266,10 @@ impl SceneRenderer {
             .write_buffer(&post_uniforms, 0, &f32_bytes(&post_values));
         let target = HdrTarget::new(gpu, hdr_format, &post_layout, &post_uniforms, size)?;
         let [r, g, b, a] = spec.clear.to_linear_premultiplied();
-        let max_parallax = layers.iter().map(|l| l.parallax.abs()).fold(0.0, f64::max);
+        let max_parallax = layers
+            .iter()
+            .map(|l| l.parallax().abs())
+            .fold(0.0, f64::max);
         tracing::debug!(
             layers = layers.len(),
             ?hdr_format,
@@ -246,9 +294,20 @@ impl SceneRenderer {
         })
     }
 
-    /// 포인터가 움직이면 화면이 바뀌는지.
+    /// 포인터가 움직이면 화면이 바뀔 수 있는지 (패럴랙스, 파티클 `pointer`).
     pub fn follows_pointer(&self) -> bool {
         self.max_parallax > 0.0
+            || self
+                .layers
+                .iter()
+                .any(|l| matches!(l, DrawLayer::Particles(p) if p.follows_pointer()))
+    }
+
+    /// 왼쪽 클릭에 반응하는지 (파티클 `burst`).
+    pub fn wants_clicks(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|l| matches!(l, DrawLayer::Particles(p) if p.wants_clicks()))
     }
 
     pub fn resize(&mut self, gpu: &Gpu, size: (u32, u32)) -> Result<()> {
@@ -273,7 +332,7 @@ impl SceneRenderer {
         f: &FrameInfo<'_>,
     ) -> bool {
         let map = FitMap::new(self.fit, self.size, f.size);
-        let moving = if self.follows_pointer() {
+        let mut moving = if self.max_parallax > 0.0 {
             let p = f.pointer;
             let goal = if p.inside {
                 // 포인터는 왼쪽 아래 원점 렌더 px.
@@ -297,11 +356,29 @@ impl SceneRenderer {
             false
         };
 
+        let shift = self.parallax.shift;
         for l in &mut self.layers {
-            let values = l.uniform(&map, self.parallax.shift);
-            if l.written != Some(values) {
-                gpu.queue.write_buffer(&l.uniforms, 0, &f32_bytes(&values));
-                l.written = Some(values);
+            match l {
+                DrawLayer::Image(l) => {
+                    let values = l.uniform(&map, shift);
+                    if l.written != Some(values) {
+                        gpu.queue.write_buffer(&l.uniforms, 0, &f32_bytes(&values));
+                        l.written = Some(values);
+                    }
+                }
+                DrawLayer::Particles(p) => moving |= p.update(gpu, map, shift, f),
+            }
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("waywall scene particles"),
+                timestamp_writes: None,
+            });
+            for l in &self.layers {
+                if let DrawLayer::Particles(p) = l {
+                    p.simulate(&mut pass);
+                }
             }
         }
 
@@ -325,12 +402,17 @@ impl SceneRenderer {
             if let Some((x, y, w, h)) = map.scissor() {
                 pass.set_scissor_rect(x, y, w, h);
                 for l in &self.layers {
-                    let Some(pipeline) = &self.pipelines[blend_index(l.blend)] else {
-                        continue;
-                    };
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, &l.bind_group, &[]);
-                    pass.draw(0..4, 0..1);
+                    match l {
+                        DrawLayer::Image(l) => {
+                            let Some(pipeline) = &self.pipelines[blend_index(l.blend)] else {
+                                continue;
+                            };
+                            pass.set_pipeline(pipeline);
+                            pass.set_bind_group(0, &l.bind_group, &[]);
+                            pass.draw(0..4, 0..1);
+                        }
+                        DrawLayer::Particles(p) => p.draw(&mut pass),
+                    }
                 }
             }
         }
@@ -413,37 +495,8 @@ fn upload_layer(
     sampler: &wgpu::Sampler,
     l: &ImageLayer,
 ) -> GpuLayer {
+    let texture = upload_texture(gpu, d, &l.id, &l.texture);
     let t = &l.texture;
-    let extent = wgpu::Extent3d {
-        width: t.width,
-        height: t.height,
-        depth_or_array_layers: 1,
-    };
-    let texture = d.create_texture(&wgpu::TextureDescriptor {
-        label: Some(&l.id),
-        size: extent,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    gpu.queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &t.data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * t.width),
-            rows_per_image: Some(t.height),
-        },
-        extent,
-    );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let uniforms = d.create_buffer(&wgpu::BufferDescriptor {
         label: Some(&l.id),
@@ -485,6 +538,46 @@ fn upload_layer(
         written: None,
         _texture: texture,
     }
+}
+
+/// premultiplied sRGB 텍스처를 GPU에 올린다.
+pub(super) fn upload_texture(
+    gpu: &Gpu,
+    d: &wgpu::Device,
+    label: &str,
+    t: &Texture,
+) -> wgpu::Texture {
+    let extent = wgpu::Extent3d {
+        width: t.width,
+        height: t.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = d.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &t.data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * t.width),
+            rows_per_image: Some(t.height),
+        },
+        extent,
+    );
+    texture
 }
 
 impl HdrTarget {
@@ -537,7 +630,7 @@ impl HdrTarget {
 }
 
 /// premultiplied 알파 기준 블렌드 (docs/wallpaper-format.md#색과-알파).
-fn blend_state(b: Blend) -> wgpu::BlendState {
+pub(super) fn blend_state(b: Blend) -> wgpu::BlendState {
     use wgpu::BlendFactor as F;
     let (src, dst) = match b {
         Blend::Normal => (F::One, F::OneMinusSrcAlpha),
@@ -559,13 +652,13 @@ fn blend_index(b: Blend) -> usize {
     BLENDS.iter().position(|&x| x == b).unwrap_or_default()
 }
 
-fn f32_bytes(values: &[f32]) -> Vec<u8> {
+pub(super) fn f32_bytes(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_ne_bytes()).collect()
 }
 
 /// 설계 좌표 ↔ 렌더 픽셀 ↔ clip 공간.
 #[derive(Debug, Clone, Copy)]
-struct FitMap {
+pub(super) struct FitMap {
     scale: [f64; 2],
     offset: [f64; 2],
     design: [f64; 2],
@@ -600,14 +693,14 @@ impl FitMap {
         ]
     }
 
-    fn to_design(self, r: [f64; 2]) -> [f64; 2] {
+    pub(super) fn to_design(self, r: [f64; 2]) -> [f64; 2] {
         [
             (r[0] - self.offset[0]) / self.scale[0],
             (r[1] - self.offset[1]) / self.scale[1],
         ]
     }
 
-    fn to_clip(self, d: [f64; 2]) -> [f64; 2] {
+    pub(super) fn to_clip(self, d: [f64; 2]) -> [f64; 2] {
         let r = self.to_render(d);
         [
             r[0] / self.target[0] * 2.0 - 1.0,
@@ -615,7 +708,7 @@ impl FitMap {
         ]
     }
 
-    fn vector_to_clip(self, v: [f64; 2]) -> [f64; 2] {
+    pub(super) fn vector_to_clip(self, v: [f64; 2]) -> [f64; 2] {
         [
             v[0] * self.scale[0] / self.target[0] * 2.0,
             -v[1] * self.scale[1] / self.target[1] * 2.0,

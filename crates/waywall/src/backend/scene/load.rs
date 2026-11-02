@@ -2,6 +2,7 @@
 //!
 //! 레이어 필드의 계층: defaults.toml `[types.scene.layer]`/`[types.scene.<타입>]` < 레이어 자신 < 사용자의 같은 섹션.
 //! 표 수준에서 병합한 뒤 엄격한 스키마로 역직렬화하므로 모르는 필드는 오류다.
+//! 예외는 파티클 `sprite`: 레이어가 무늬(`texture`/`sprite`)를 정했으면 사용자 값이 그것을 덮지 않는다.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -9,11 +10,15 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use toml::{Table, Value};
+use waywall_proto::Color;
 use waywall_proto::color::{linear_to_srgb, srgb_to_linear};
-use waywall_proto::config::{Blend, Scale, SceneOptions};
+use waywall_proto::config::{
+    Blend, Emitter, EmitterShape, ParticlePointer, PointerMode, Ramp, Scale, SceneOptions, Span,
+    Turbulence, VelocityRange,
+};
 use waywall_proto::project::WallpaperKind;
 
-use super::{ImageLayer, SceneSpec, Texture};
+use super::{ImageLayer, Layer, ParticleLayer, SceneSpec, Texture};
 use crate::assets::Assets;
 use crate::config::{Layers, OutputConfig, merge};
 use crate::gpu::compile_wgsl;
@@ -23,6 +28,8 @@ use crate::wallpaper::Wallpaper;
 const IMAGE_SHADER: &str = "shaders/scene/image.wgsl";
 const POST_SHADER: &str = "shaders/scene/post.wgsl";
 const TONEMAP_DIR: &str = "shaders/tonemap";
+const SIMULATE_SHADER: &str = "shaders/particles/simulate.wgsl";
+const PARTICLE_SHADER: &str = "shaders/particles/render.wgsl";
 const PROPERTY_SIGIL: char = '$';
 /// `scene.toml` 최상위 섹션.
 const TOP_KEYS: [&str; 4] = ["scene", "layer", "light", "post"];
@@ -31,8 +38,13 @@ const SCENE_OPTION_KEYS: [&str; 2] = ["fit", "clear"];
 const SCENE_SIZE_KEYS: [&str; 2] = ["width", "height"];
 /// 사용자 설정에서 레이어 필드를 덮어쓰는 섹션: `[types.scene.layer]`, `[types.scene.<타입>]`.
 const COMMON_SECTION: &str = "layer";
+const IMAGE: &str = "image";
+const PARTICLES: &str = "particles";
+/// 파티클 무늬를 정하는 레이어 필드.
+const LOOK_KEYS: [&str; 2] = ["texture", "sprite"];
+const SPRITE_KEY: &str = "sprite";
 /// 아직 없는 기능: (필드 또는 레이어 타입, 들어오는 마일스톤).
-const NOT_YET_TYPES: [(&str, &str); 2] = [("particles", "M6b"), ("shader", "M6c")];
+const NOT_YET_TYPES: [(&str, &str); 1] = [("shader", "M6c")];
 const NOT_YET_FIELDS: [(&str, &str); 5] = [
     ("normal_map", "M6c"),
     ("lit", "M6c"),
@@ -56,6 +68,62 @@ struct ImageLayerDef {
     position: Option<[f64; 2]>,
     scale: Scale,
     rotation: f64,
+}
+
+/// particles 레이어 (병합 후).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParticleLayerDef {
+    #[serde(rename = "type")]
+    _kind: String,
+    id: Option<String>,
+    blend: Blend,
+    opacity: f64,
+    parallax: f64,
+    visible: bool,
+    max: u32,
+    texture: Option<String>,
+    sprite: String,
+    emitter: Emitter,
+    lifetime: Span,
+    velocity: VelocityRange,
+    gravity: [f64; 2],
+    drag: f64,
+    turbulence: Turbulence,
+    size: Ramp<f64>,
+    color: Ramp<Color>,
+    emissive: f64,
+    pointer: ParticlePointer,
+    max_step: f64,
+}
+
+enum LayerDef {
+    Image(ImageLayerDef),
+    /// `bool`: `sprite`가 레이어 자신의 값(배경 디렉터리 기준)인지. 아니면 assets 기준.
+    Particles(Box<ParticleLayerDef>, bool),
+}
+
+impl LayerDef {
+    fn id(&self) -> Option<&String> {
+        match self {
+            LayerDef::Image(d) => d.id.as_ref(),
+            LayerDef::Particles(d, _) => d.id.as_ref(),
+        }
+    }
+
+    fn visible(&self) -> bool {
+        match self {
+            LayerDef::Image(d) => d.visible,
+            LayerDef::Particles(d, _) => d.visible,
+        }
+    }
+
+    fn texture(&self) -> Option<&String> {
+        match self {
+            LayerDef::Image(d) => Some(&d.texture),
+            LayerDef::Particles(d, _) => d.texture.as_ref(),
+        }
+    }
 }
 
 /// `entry`: scene.toml 경로. 텍스처 경로는 그 디렉터리 기준.
@@ -82,50 +150,70 @@ pub fn load(
 
     let image_shader = compile_wgsl(IMAGE_SHADER, &asset_text(assets, IMAGE_SHADER)?)?;
     let post_shader = compile_post(assets, &opts.post.tonemap)?;
+    let simulate_shader = compile_wgsl(SIMULATE_SHADER, &asset_text(assets, SIMULATE_SHADER)?)?;
 
     let user_common = layers.user_type_section(WallpaperKind::Scene, COMMON_SECTION);
     let mut defs = Vec::new();
     let mut ids = HashSet::new();
     for (i, raw) in doc.layers.into_iter().enumerate() {
-        let def = image_def(i, raw, &opts, user_common, layers)?;
-        let id = def.id.clone().unwrap_or_else(|| format!("layer{i}"));
+        let def = layer_def(i, raw, &opts, user_common, layers)?;
+        let id = def.id().cloned().unwrap_or_else(|| format!("layer{i}"));
         ensure!(ids.insert(id.clone()), "duplicate layer id `{id}`");
-        if def.visible {
+        if def.visible() {
             defs.push((id, def));
         }
     }
 
     // 디코딩은 텍스처마다 스레드 하나로 병렬 처리하고 모두 끝날 때까지 기다린다.
-    let textures: Vec<Result<Texture>> = std::thread::scope(|s| {
+    let textures: Vec<Option<Result<Texture>>> = std::thread::scope(|s| {
         let handles: Vec<_> = defs
             .iter()
             .map(|(id, def)| {
-                let path = base.join(&def.texture);
-                s.spawn(move || {
+                let path = base.join(def.texture()?);
+                Some(s.spawn(move || {
                     decode(&path).with_context(|| format!("layer `{id}`: {}", path.display()))
-                })
+                }))
             })
             .collect();
         handles
             .into_iter()
             .map(|h| {
-                h.join()
-                    .unwrap_or_else(|_| bail!("texture decoder panicked"))
+                h.map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| bail!("texture decoder panicked"))
+                })
             })
             .collect()
     });
-    let center = [doc.size[0] / 2.0, doc.size[1] / 2.0];
-    let mut image_layers = Vec::with_capacity(defs.len());
+    let mut scene_layers = Vec::with_capacity(defs.len());
     for ((id, def), texture) in defs.into_iter().zip(textures) {
-        image_layers.push(ImageLayer {
-            id,
-            blend: def.blend,
-            opacity: def.opacity,
-            parallax: def.parallax,
-            position: def.position.unwrap_or(center),
-            scale: def.scale.xy(),
-            rotation: def.rotation,
-            texture: texture?,
+        let texture = texture.transpose()?;
+        scene_layers.push(match def {
+            LayerDef::Image(d) => Layer::Image(ImageLayer {
+                id,
+                blend: d.blend,
+                opacity: d.opacity,
+                parallax: d.parallax,
+                position: d.position.unwrap_or([doc.size[0] / 2.0, doc.size[1] / 2.0]),
+                scale: d.scale.xy(),
+                rotation: d.rotation,
+                texture: texture.context("image layer without a texture")?,
+            }),
+            LayerDef::Particles(d, own_sprite) => {
+                let sprite = if own_sprite {
+                    let path = base.join(&d.sprite);
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("layer `{id}`: {}", path.display()))?
+                } else {
+                    asset_text(assets, &d.sprite).with_context(|| format!("layer `{id}`"))?
+                };
+                let shader = compile_wgsl(
+                    &format!("{PARTICLE_SHADER} + {}", d.sprite),
+                    &format!("{}\n{sprite}", asset_text(assets, PARTICLE_SHADER)?),
+                )
+                .with_context(|| format!("layer `{id}`"))?;
+                Layer::Particles(Box::new(particle_layer(id, *d, texture, shader, doc.size)))
+            }
         });
     }
 
@@ -136,11 +224,54 @@ pub fn load(
         exposure: opts.post.exposure,
         pointer_smoothing: opts.pointer_smoothing,
         settle_px: opts.settle_px,
-        layers: image_layers,
+        layers: scene_layers,
         image_shader,
         post_shader,
+        simulate_shader,
     };
     Ok((spec, opts))
+}
+
+fn particle_layer(
+    id: String,
+    d: ParticleLayerDef,
+    texture: Option<Texture>,
+    shader: naga::Module,
+    design: [f64; 2],
+) -> ParticleLayer {
+    let e = &d.emitter;
+    let extent = match e.shape {
+        EmitterShape::Point => [0.0, 0.0],
+        EmitterShape::Box => {
+            let s = e.size.unwrap_or(design);
+            [s[0] / 2.0, s[1] / 2.0]
+        }
+        EmitterShape::Circle => [e.radius.unwrap_or_default(); 2],
+    };
+    ParticleLayer {
+        id,
+        blend: d.blend,
+        opacity: d.opacity,
+        parallax: d.parallax,
+        max: d.max,
+        texture,
+        shader,
+        shape: e.shape,
+        center: e.position.unwrap_or([design[0] / 2.0, design[1] / 2.0]),
+        extent,
+        rate: e.rate,
+        burst: e.burst,
+        lifetime: d.lifetime.range(),
+        velocity: d.velocity,
+        gravity: d.gravity,
+        drag: d.drag,
+        turbulence: d.turbulence,
+        size: d.size.ends(),
+        color: d.color.ends(),
+        emissive: d.emissive,
+        pointer: d.pointer,
+        max_step: d.max_step,
+    }
 }
 
 /// `scene.toml`을 나눈 결과.
@@ -205,13 +336,13 @@ impl SceneDoc {
     }
 }
 
-fn image_def(
+fn layer_def(
     i: usize,
     raw: Table,
     opts: &SceneOptions,
     user_common: Option<&Table>,
     layers: &Layers,
-) -> Result<ImageLayerDef> {
+) -> Result<LayerDef> {
     let name = raw
         .get("id")
         .and_then(Value::as_str)
@@ -220,30 +351,83 @@ fn image_def(
     let kind = raw
         .get("type")
         .and_then(Value::as_str)
-        .with_context(|| format!("{}: missing `type`", ctx()))?;
+        .with_context(|| format!("{}: missing `type`", ctx()))?
+        .to_owned();
     if let Some((_, m)) = NOT_YET_TYPES.iter().find(|(t, _)| *t == kind) {
         bail!("{}: {kind} layers are not supported yet ({m})", ctx());
     }
-    ensure!(
-        kind == "image",
-        "{}: unknown layer type `{kind}` (image | particles | shader)",
-        ctx()
-    );
+    let type_defaults = match kind.as_str() {
+        IMAGE => Table::try_from(&opts.image)?,
+        PARTICLES => Table::try_from(&opts.particles)?,
+        _ => bail!(
+            "{}: unknown layer type `{kind}` (image | particles | shader)",
+            ctx()
+        ),
+    };
     if let Some((f, m)) = NOT_YET_FIELDS.iter().find(|(f, _)| raw.contains_key(*f)) {
         bail!("{}: `{f}` is not supported yet ({m})", ctx());
     }
+    let own_look = LOOK_KEYS.iter().any(|k| raw.contains_key(*k));
+    let own_sprite = raw.contains_key(SPRITE_KEY);
 
-    // opts.layer/opts.image는 이미 defaults < 사용자. 레이어 값을 얹은 뒤 사용자 값을 다시 얹는다.
+    // opts.layer/opts.<타입>은 이미 defaults < 사용자. 레이어 값을 얹은 뒤 사용자 값을 다시 얹는다.
     let mut t = Table::try_from(&opts.layer)?;
-    merge(&mut t, &Table::try_from(&opts.image)?);
+    merge(&mut t, &type_defaults);
     merge(&mut t, &raw);
     if let Some(u) = user_common {
         merge(&mut t, u);
     }
-    if let Some(u) = layers.user_type_section(WallpaperKind::Scene, kind) {
-        merge(&mut t, u);
+    if let Some(u) = layers.user_type_section(WallpaperKind::Scene, &kind) {
+        let mut u = u.clone();
+        if own_look {
+            u.remove(SPRITE_KEY);
+        }
+        merge(&mut t, &u);
     }
-    t.try_into().with_context(ctx)
+    if kind == IMAGE {
+        return Ok(LayerDef::Image(t.try_into().with_context(ctx)?));
+    }
+    let d: ParticleLayerDef = t.try_into().with_context(ctx)?;
+    check_particles(&d).with_context(ctx)?;
+    Ok(LayerDef::Particles(Box::new(d), own_sprite))
+}
+
+fn check_particles(d: &ParticleLayerDef) -> Result<()> {
+    ensure!(d.max > 0, "`max` must be at least 1");
+    let [lo, hi] = d.lifetime.range();
+    ensure!(
+        lo > 0.0 && lo <= hi,
+        "`lifetime` must be positive and [min, max] ordered"
+    );
+    let e = &d.emitter;
+    ensure!(
+        e.rate >= 0.0 && e.rate.is_finite(),
+        "`emitter.rate` must be >= 0"
+    );
+    match e.shape {
+        EmitterShape::Circle => ensure!(
+            e.radius.is_some_and(|r| r > 0.0),
+            "`emitter.radius` is required for circle (> 0)"
+        ),
+        EmitterShape::Box => ensure!(
+            e.size.is_none_or(|s| s[0] >= 0.0 && s[1] >= 0.0),
+            "`emitter.size` must not be negative"
+        ),
+        EmitterShape::Point => {}
+    }
+    ensure!(d.drag >= 0.0, "`drag` must be >= 0");
+    ensure!(d.max_step > 0.0, "`max_step` must be positive");
+    ensure!(
+        d.turbulence.strength == 0.0 || d.turbulence.scale > 0.0,
+        "`turbulence.scale` must be positive"
+    );
+    ensure!(
+        d.pointer.mode == PointerMode::None || d.pointer.radius > 0.0,
+        "`pointer.radius` must be positive"
+    );
+    let [s0, s1] = d.size.ends();
+    ensure!(s0 >= 0.0 && s1 >= 0.0, "`size` must not be negative");
+    Ok(())
 }
 
 fn compile_post(assets: &Assets, tonemap: &str) -> Result<naga::Module> {
@@ -429,6 +613,30 @@ mod tests {
             .unwrap()
     }
 
+    fn image_def(
+        raw: Table,
+        o: &SceneOptions,
+        common: Option<&Table>,
+        l: &Layers,
+    ) -> ImageLayerDef {
+        match layer_def(0, raw, o, common, l).unwrap() {
+            LayerDef::Image(d) => d,
+            LayerDef::Particles(..) => panic!("not an image layer"),
+        }
+    }
+
+    fn particle_def(
+        raw: &str,
+        o: &SceneOptions,
+        common: Option<&Table>,
+        l: &Layers,
+    ) -> (ParticleLayerDef, bool) {
+        match layer_def(0, raw.parse().unwrap(), o, common, l).unwrap() {
+            LayerDef::Particles(d, own) => (*d, own),
+            LayerDef::Image(_) => panic!("not a particles layer"),
+        }
+    }
+
     #[test]
     fn layer_fields_user_beats_author() {
         let raw: Table =
@@ -438,7 +646,7 @@ mod tests {
 
         let l = Layers::load_for_test("");
         let o = scene_opts(&l);
-        let d = image_def(0, raw.clone(), &o, None, &l).unwrap();
+        let d = image_def(raw.clone(), &o, None, &l);
         assert_eq!(d.parallax, 0.05, "layer beats defaults");
         assert_eq!(d.scale.xy(), [1.1, 1.2]);
         assert_eq!(d.opacity, 1.0, "defaults fill the rest");
@@ -448,9 +656,47 @@ mod tests {
         );
         let o = scene_opts(&l);
         let common = l.user_type_section(WallpaperKind::Scene, COMMON_SECTION);
-        let d = image_def(0, raw, &o, common, &l).unwrap();
+        let d = image_def(raw, &o, common, &l);
         assert_eq!(d.parallax, 0.0, "user beats layer");
         assert_eq!(d.rotation, 5.0);
+    }
+
+    #[test]
+    fn particle_fields_and_sprite_rule() {
+        let l = Layers::load_for_test("");
+        let o = scene_opts(&l);
+        let (d, own) = particle_def(
+            "type = \"particles\"\nemitter = { shape = \"box\", rate = 50 }\nsize = { start = 6, end = 2 }",
+            &o,
+            None,
+            &l,
+        );
+        assert!(!own);
+        assert_eq!(d.blend, Blend::Add, "particle defaults beat layer defaults");
+        assert_eq!(d.emitter.shape, EmitterShape::Box);
+        assert_eq!(d.emitter.rate, 50.0);
+        assert_eq!(d.emitter.burst, 0, "emitter table merges with defaults");
+        assert_eq!(d.size.ends(), [6.0, 2.0]);
+        assert_eq!(d.color.ends()[0], "#ffffff".parse().unwrap());
+        assert_eq!(d.sprite, o.particles.sprite);
+
+        // 사용자 sprite는 무늬를 정하지 않은 레이어의 기본값일 뿐, 그 밖의 필드는 사용자가 이긴다.
+        let l = Layers::load_for_test(
+            "[types.scene.particles]\nsprite = \"sprites/mine.wgsl\"\ndrag = 2.0",
+        );
+        let o = scene_opts(&l);
+        let user = l.user_type_section(WallpaperKind::Scene, PARTICLES);
+        assert!(user.is_some());
+        let (d, own) = particle_def("type = \"particles\"\ndrag = 0.5", &o, None, &l);
+        assert_eq!(
+            (d.sprite.as_str(), own, d.drag),
+            ("sprites/mine.wgsl", false, 2.0)
+        );
+        let (d, own) = particle_def("type = \"particles\"\nsprite = \"dot.wgsl\"", &o, None, &l);
+        assert_eq!((d.sprite.as_str(), own), ("dot.wgsl", true));
+        let (d, own) = particle_def("type = \"particles\"\ntexture = \"glow.png\"", &o, None, &l);
+        assert_eq!(d.texture.as_deref(), Some("glow.png"));
+        assert!(!own);
     }
 
     #[test]
@@ -458,15 +704,33 @@ mod tests {
         let l = Layers::load_for_test("");
         let o = scene_opts(&l);
         for (bad, why) in [
-            ("type = \"particles\"", "M6b"),
             ("type = \"shader\"", "M6c"),
             ("type = \"blob\"", "unknown layer type"),
             ("type = \"image\"\ntexture = \"a.png\"\nlit = true", "M6c"),
             ("type = \"image\"\ntexture = \"a.png\"\nclip = \"x\"", "M6d"),
             ("type = \"image\"\ntexture = \"a.png\"\nzoom = 1", "zoom"),
             ("type = \"image\"", "texture"),
+            ("type = \"particles\"\nmax = 0", "max"),
+            ("type = \"particles\"\nlifetime = [3.0, 1.0]", "lifetime"),
+            (
+                "type = \"particles\"\nemitter = { shape = \"circle\" }",
+                "radius",
+            ),
+            (
+                "type = \"particles\"\nemitter = { shape = \"star\" }",
+                "star",
+            ),
+            (
+                "type = \"particles\"\npointer = { mode = \"repel\", radius = 0 }",
+                "radius",
+            ),
+            ("type = \"particles\"\nemitter = { rate = -1 }", "rate"),
+            ("type = \"particles\"\nwind = 3", "wind"),
         ] {
-            let e = image_def(0, bad.parse().unwrap(), &o, None, &l).expect_err(bad);
+            let e = match layer_def(0, bad.parse().unwrap(), &o, None, &l) {
+                Ok(_) => panic!("{bad} should be rejected"),
+                Err(e) => e,
+            };
             assert!(format!("{e:#}").contains(why), "{bad}: {e:#}");
         }
     }
@@ -503,5 +767,17 @@ mod tests {
         }
         assert!(compile_post(&assets, "../x").is_err());
         assert!(compile_post(&assets, "nope").is_err());
+        compile_wgsl(
+            SIMULATE_SHADER,
+            &asset_text(&assets, SIMULATE_SHADER).unwrap(),
+        )
+        .unwrap();
+        let o = scene_opts(&Layers::load_for_test(""));
+        let src = format!(
+            "{}\n{}",
+            asset_text(&assets, PARTICLE_SHADER).unwrap(),
+            asset_text(&assets, &o.particles.sprite).unwrap()
+        );
+        compile_wgsl(PARTICLE_SHADER, &src).unwrap();
     }
 }

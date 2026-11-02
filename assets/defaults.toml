@@ -98,10 +98,20 @@ scale    = 1.0               # 숫자 또는 [x, y]
 rotation = 0.0               # 도, 시계 방향
 
 [types.scene.particles]
-sprite   = "sprites/soft-circle.wgsl"
-blend    = "add"
-drag     = 0.0
-emissive = 1.0
+max        = 1000            # GPU 버퍼 크기. 모자라면 오래된 파티클부터 바뀜
+sprite     = "sprites/soft-circle.wgsl"   # 무늬(texture/sprite)를 정하지 않은 레이어의 기본값 (assets 기준)
+blend      = "add"
+emitter    = { shape = "point", rate = 10.0, burst = 0 }   # point | box | circle
+lifetime   = [1.0, 2.0]      # 초, 숫자 또는 [최소, 최대]
+velocity   = { min = [0.0, 0.0], max = [0.0, 0.0] }        # px/s
+gravity    = [0.0, 0.0]      # px/s², y가 아래로 +
+drag       = 0.0             # 1/s
+turbulence = { strength = 0.0, scale = 0.005, speed = 0.5 }  # px/s, 1/px, 흐름 변화 속도
+size       = 4.0             # 지름 px, 숫자 또는 { start, end }
+color      = "#ffffff"       # 값 하나 또는 { start, end }
+emissive   = 1.0
+pointer    = { mode = "none", radius = 200.0, strength = 300.0 }  # none | attract | repel, px, px/s²
+max_step   = 0.1             # 한 프레임 시뮬레이션의 최대 dt(초)
 
 [types.scene.light.point]
 radius    = 300.0

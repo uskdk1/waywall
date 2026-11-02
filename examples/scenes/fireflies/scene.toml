@@ -1,0 +1,61 @@
+# M6b 예제: 파티클 (docs/wallpaper-format.md#레이어-타입).
+# 반딧불이 숲 사이를 떠다니다 커서 쪽으로 끌려오고, 왼쪽 클릭하면 그 자리에서 불꽃이 튄다.
+
+[scene]
+width  = 1920
+height = 1080
+fit    = "cover"
+clear  = "#070b1c"
+
+[[layer]]
+type     = "image"
+id       = "sky"
+texture  = "textures/sky.png"       # 480×270 그라디언트를 늘려 씀
+scale    = 4.2
+parallax = 0.005
+
+[[layer]]
+type     = "image"
+id       = "far"
+texture  = "textures/far.png"
+position = [960, 850]
+parallax = 0.02
+
+[[layer]]
+type       = "particles"
+id         = "fireflies"
+max        = 3000
+emitter    = { shape = "box", position = [960, 780], size = [1920, 520], rate = "$density" }
+lifetime   = [3.0, 7.0]
+velocity   = { min = [-15, -20], max = [15, 10] }
+drag       = 0.6
+turbulence = { strength = 25, scale = 0.004, speed = 0.3 }
+size       = { start = 9, end = 4 }
+color      = { start = "#fff2a8", end = "#ffb03000" }
+emissive   = 3.0
+pointer    = { mode = "attract", radius = 260, strength = 220 }
+parallax   = 0.035
+
+[[layer]]
+type     = "image"
+id       = "near"
+texture  = "textures/near.png"
+position = [960, 890]
+parallax = 0.06
+
+[[layer]]
+type     = "particles"
+id       = "sparks"
+max      = 2000
+emitter  = { rate = 0, burst = 150 }  # 클릭할 때만
+lifetime = [0.6, 1.4]
+velocity = { min = [-240, -300], max = [240, 60] }
+gravity  = [0, 420]
+drag     = 1.2
+size     = { start = 6, end = 1 }
+color    = { start = "#ffe7a0", end = "#ff6a0000" }
+emissive = 4.0
+parallax = 0.06
+
+[post]
+tonemap = "agx"

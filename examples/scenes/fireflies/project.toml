@@ -1,0 +1,13 @@
+[wallpaper]
+name  = "Firefly Forest"
+type  = "scene"
+entry = "scene.toml"
+
+[options]
+interactive = true
+
+[properties.density]
+type    = "float"
+default = 60.0
+min     = 0.0
+max     = 400.0

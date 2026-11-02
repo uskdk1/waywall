@@ -268,13 +268,112 @@ impl Scale {
     }
 }
 
+/// particles 레이어 필드의 내장값/사용자 값 (docs/wallpaper-format.md#레이어-타입).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SceneParticleDefaults {
+    pub max: u32,
+    /// 무늬를 정하지 않은 레이어의 스프라이트 (assets 기준 경로).
     pub sprite: String,
     pub blend: Blend,
+    pub emitter: Emitter,
+    pub lifetime: Span,
+    pub velocity: VelocityRange,
+    pub gravity: [f64; 2],
     pub drag: f64,
+    pub turbulence: Turbulence,
+    pub size: Ramp<f64>,
+    pub color: Ramp<Color>,
     pub emissive: f64,
+    pub pointer: ParticlePointer,
+    pub max_step: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Emitter {
+    pub shape: EmitterShape,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+    pub rate: f64,
+    pub burst: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EmitterShape {
+    Point,
+    Box,
+    Circle,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VelocityRange {
+    pub min: [f64; 2],
+    pub max: [f64; 2],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Turbulence {
+    pub strength: f64,
+    pub scale: f64,
+    pub speed: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParticlePointer {
+    pub mode: PointerMode,
+    pub radius: f64,
+    pub strength: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PointerMode {
+    None,
+    Attract,
+    Repel,
+}
+
+/// 숫자 하나 또는 `[최소, 최대]`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Span {
+    One(f64),
+    Range([f64; 2]),
+}
+
+impl Span {
+    pub fn range(self) -> [f64; 2] {
+        match self {
+            Span::One(v) => [v, v],
+            Span::Range(r) => r,
+        }
+    }
+}
+
+/// 값 하나 또는 수명에 따라 보간하는 `{ start, end }`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Ramp<T> {
+    Const(T),
+    Range { start: T, end: T },
+}
+
+impl<T: Copy> Ramp<T> {
+    pub fn ends(self) -> [T; 2] {
+        match self {
+            Ramp::Const(v) => [v, v],
+            Ramp::Range { start, end } => [start, end],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

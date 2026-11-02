@@ -411,7 +411,11 @@ impl GpuView {
         }
         match &self.renderer {
             Renderer::Shader(_) => true,
-            Renderer::Scene(s) => s.follows_pointer(),
+            Renderer::Scene(s) => {
+                s.follows_pointer()
+                    || matches!(kind, PointerEventKind::Press { button, .. }
+                        if button_bit(*button) == Some(MOUSE_BUTTON_BIT) && s.wants_clicks())
+            }
         }
     }
 }
@@ -469,6 +473,8 @@ pub struct Pointer {
     pub buttons: u32,
     pub mouse: [f32; 4],
     pub click: [f32; 4],
+    /// 왼쪽 버튼을 누른 횟수 (wrapping). 위치는 `mouse.zw`의 절댓값.
+    pub presses: u32,
 }
 
 impl Pointer {
@@ -487,6 +493,7 @@ impl Pointer {
         if bit == MOUSE_BUTTON_BIT {
             // z>0: 누르는 중, w>0: 누른 첫 프레임.
             self.mouse = [x, y, x, y];
+            self.presses = self.presses.wrapping_add(1);
         }
     }
 
@@ -514,6 +521,7 @@ mod tests {
         p.press(MOUSE_BUTTON_BIT, 10.0, 20.0, 1.5);
         assert_eq!(p.mouse, [10.0, 20.0, 10.0, 20.0]);
         assert_eq!(p.click, [10.0, 20.0, 1.5, 1.0]);
+        assert_eq!(p.presses, 1);
         p.after_frame();
         assert!(p.mouse[3] < 0.0, "w is positive only on the click frame");
         p.motion(30.0, 40.0);

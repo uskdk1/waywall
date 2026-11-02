@@ -315,20 +315,65 @@ GLSL에서는 Shadertoy처럼 `texture(iChannel0, uv)`와 `iChannelResolution[n]
 
 **particles**
 
+필드를 생략하면 `defaults.toml`의 `[types.scene.particles]` 값을 씁니다(사용자의 같은 섹션이 있으면 그 값이 모든 파티클 레이어에 우선).
+좌표·크기·속도는 설계 px, 시간은 초입니다.
+
 | 필드 | 설명 |
 |---|---|
-| `max` | 최대 파티클 수 (GPU 버퍼 크기). 수십만 개까지 실용적 |
-| `texture` | 스프라이트 이미지 |
-| `sprite` | 절차적 스프라이트 셰이더(WGSL) 경로. `texture`와 둘 다 없으면 `defaults.toml`의 `sprite` 값 사용 (사용자 `[types.scene.particles] sprite`가 있으면 그것이 우선) |
-| `emitter` | `shape`(`point` · `box` · `circle`), `position`, `size`/`radius`, `rate`(초당), `burst`(클릭 시 방출 개수) |
-| `lifetime` | `[최소, 최대]` 초 |
-| `velocity` | `{min, max}` 초기 속도 범위 (px/s) |
-| `gravity` | 가속도 (px/s²) |
-| `drag` | 감속 계수 |
-| `turbulence` | `{strength, scale}` curl noise |
-| `size`, `color` | `{start, end}` 수명에 따른 보간 |
-| `emissive` | HDR 밝기 배율 |
-| `pointer` | `{mode, radius, strength}` 포인터 상호작용 |
+| `max` | 최대 파티클 수(GPU 버퍼 크기). 수십만 개까지 실용적. 모자라면 가장 오래된 파티클부터 새 파티클로 바뀜 |
+| `texture` | 스프라이트 이미지 (배경 디렉터리 기준) |
+| `sprite` | 절차적 스프라이트 셰이더(WGSL, 배경 디렉터리 기준). 아래 [스프라이트](#스프라이트) |
+| `emitter` | 방출기 (아래 표) |
+| `lifetime` | 수명. 숫자 또는 `[최소, 최대]` (파티클마다 무작위) |
+| `velocity` | `{ min = [x, y], max = [x, y] }` 초기 속도 범위 (px/s, 성분마다 무작위) |
+| `gravity` | `[x, y]` 가속도 (px/s², y가 아래로 +) |
+| `drag` | 감속 계수(1/s). 속도가 초당 `e^(−drag)`배로 줄어듦 |
+| `turbulence` | `{ strength, scale, speed }` curl noise 흐름. `strength`는 흐름 속도(px/s), `scale`은 노이즈 주파수(1/px), `speed`는 흐름이 바뀌는 빠르기 |
+| `size` | 지름(px). 숫자 또는 `{ start, end }` (수명에 따라 보간) |
+| `color` | 색(RGBA). 값 하나 또는 `{ start, end }`. 끝 색의 알파를 0으로 하면 사라지며 꺼짐 |
+| `emissive` | 색에 곱하는 HDR 밝기 배율. 1보다 크면 블룸(M6c)으로 번짐 |
+| `pointer` | `{ mode, radius, strength }` 포인터 상호작용. `mode`: `none` · `attract`(끌어당김) · `repel`(밀어냄). `radius` 안에서 `strength`(px/s²)의 힘, 가장자리로 갈수록 약해짐 |
+| `max_step` | 한 프레임 시뮬레이션의 최대 시간 간격(초). 오래 멈췄다 깨어나도 파티클이 튀거나 한꺼번에 나오지 않게 함 |
+
+`emitter`:
+
+| 필드 | 설명 |
+|---|---|
+| `shape` | `point` · `box` · `circle` |
+| `position` | 중심 `[x, y]`. 생략하면 설계 영역 중앙 |
+| `size` | `box`의 `[폭, 높이]`. 생략하면 설계 영역 전체 |
+| `radius` | `circle`의 반지름. `circle`이면 필수 (원 안에서 고르게) |
+| `rate` | 초당 방출 수. `0`이면 클릭 때만 방출 |
+| `burst` | 왼쪽 클릭마다 **클릭한 위치**에서 방출하는 수 (`shape`와 관계없이 한 점). `0`이면 클릭에 반응하지 않음 |
+
+#### 스프라이트
+
+파티클 하나는 화면을 향한 사각형이며 `size`가 그 한 변입니다. 무늬는 다음 순서로 정합니다.
+
+1. 레이어의 `texture` — 이미지 색 × 파티클 색
+2. 레이어의 `sprite` — 셰이더가 돌려준 값 × 파티클 색
+3. 둘 다 없으면 `[types.scene.particles] sprite`(사용자 값 > `defaults.toml`, **assets 기준 경로**. 내장은 `sprites/soft-circle.wgsl`)
+
+`sprite`는 레이어가 정한 무늬를 바꾸지 않습니다. 사용자의 `[types.scene.particles] sprite`는 무늬를 정하지 않은 레이어의 기본값일 뿐입니다.
+스프라이트 셰이더는 함수 하나만 정의합니다. `uv`는 사각형의 왼쪽 위가 `(0, 0)`, 오른쪽 아래가 `(1, 1)`입니다.
+
+```wgsl
+// 반환값: 선형, premultiplied RGBA. 파티클 색(× emissive × opacity)과 곱해짐
+fn sprite(uv: vec2<f32>) -> vec4<f32> {
+    let d = length(uv * 2.0 - 1.0);
+    return vec4<f32>(pow(1.0 - smoothstep(0.0, 1.0, d), 2.0));
+}
+```
+
+#### 동작
+
+- 시뮬레이션은 compute 셰이더로 GPU에서 하므로 파티클 수와 관계없이 CPU 비용은 프레임마다 거의 같습니다.
+- 파티클 버퍼는 고리 버퍼입니다. 새 파티클은 다음 자리부터 차례로 들어가고, `max`가 `rate × 최대 수명`보다 작으면
+  수명이 남은 파티클이 먼저 바뀝니다.
+- `rate = 0`이고 살아 있는 파티클이 없으면 그 레이어는 잠듭니다(burst 전용 레이어는 클릭 후 수명이 다하면 다시 비용 0).
+  `rate > 0`인 레이어가 있으면 씬은 계속 그립니다.
+- 포인터 상호작용과 burst 위치는 레이어의 패럴랙스 이동을 뺀 좌표로 계산해, 화면에서 커서가 있는 곳에 맞습니다.
+- 클릭(burst)과 `pointer`는 `interactive = true`일 때만 동작합니다.
 
 ### 조명 타입
 
@@ -357,8 +402,8 @@ GLSL에서는 Shadertoy처럼 `texture(iChannel0, uv)`와 `iChannelResolution[n]
 
 ### 구현 상태
 
-M6a에서는 `image` 레이어, 패럴랙스, `[post]`의 `exposure`·`tonemap`까지 동작합니다. 아직 없는 기능을 쓰면
-배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다: `particles`(M6b), `shader` 레이어 · `[[light]]` ·
+M6b까지 `image`·`particles` 레이어, 패럴랙스, `[post]`의 `exposure`·`tonemap`이 동작합니다. 아직 없는 기능을 쓰면
+배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다: `shader` 레이어 · `[[light]]` ·
 `normal_map` · `lit`(M6c), `clip` · `follow` · `effects`(M6d). `[post]`의 `bloom`·`vignette`는 값 검사만 하고 M6c부터 적용됩니다.
 
 ### 레이어 효과 (`effects`)

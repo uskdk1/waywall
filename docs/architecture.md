@@ -127,9 +127,10 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
 형식은 [wallpaper-format.md](wallpaper-format.md#씬-배경).
 
 ```
- 레이어 패스 (HDR 텍스처, render.hdr_format, 렌더 크기)        후처리 패스 (swapchain의 sRGB 뷰)
- clear(선형 clear 색) → image 레이어마다 사각형 1개 draw  ──▶  전체 삼각형: 노출 × HDR → tonemap() → sRGB 인코딩
-                       (blend 모드별 파이프라인, contain이면 설계 영역 scissor)
+ compute 패스            레이어 패스 (HDR 텍스처, render.hdr_format, 렌더 크기)      후처리 패스 (swapchain의 sRGB 뷰)
+ particles 레이어마다 ──▶ clear(선형 clear 색) → 레이어 순서대로 draw            ──▶  전체 삼각형: 노출 × HDR → tonemap() → sRGB 인코딩
+ dispatch 1번              image: 사각형 1개, particles: 인스턴스 사각형 max개
+                           (contain이면 설계 영역 scissor)
 ```
 
 - **로드** (`set` 처리 중, 메인 스레드): `scene.toml` 파싱 → `"$속성"` 치환 → 레이어마다 defaults/작성자/사용자 계층 병합 후
@@ -139,8 +140,15 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
   레이어마다 작은 uniform 버퍼에 쓴다. 변하지 않으면 쓰지 않는다.
 - 후처리 셰이더는 `scene/post.wgsl` + `tonemap/<이름>.wgsl`을 이어 붙여 naga로 검증. 톤매핑 함수만 바꾸는 사용자 파일은 짧다.
 - swapchain은 sRGB 포맷(없으면 UNORM + sRGB 뷰 포맷)으로 만들어 인코딩을 하드웨어가 한다. 셰이더 배경의 UNORM(값 그대로)과 다르다.
-- **잠들기:** `draw`가 "아직 움직이는 중"(패럴랙스가 목표에 도달하지 않음)을 돌려줄 때만 다음 frame 콜백에서 다시 그린다.
-  아니면 렌더 루프를 멈추고, 포인터 이벤트·크기 변경·`reload`에서만 한 장 그린다. 정적인 씬은 표시 후 비용 0.
+- **파티클:** 레이어마다 storage 버퍼 하나(파티클당 위치·속도·나이·수명 24바이트 × `max`, 0으로 초기화 = 모두 죽음).
+  CPU는 프레임마다 방출 수만 정한다: `rate × dt`의 정수부(소수부는 이월) + 새 왼쪽 클릭 수 × `burst`. 고리 버퍼의
+  다음 자리 `[cursor, cursor + n)`을 compute 셰이더에 알려 주면, 그 범위의 스레드는 파티클을 새로 만들고(난수 = 인덱스와
+  프레임 시드의 해시) 나머지는 살아 있으면 적분한다. 원자 연산도 GPU → CPU 읽기도 없다.
+  그리기는 `particles/render.wgsl` + 스프라이트 파일을 이어 붙인 레이어 전용 파이프라인(블렌드·스프라이트가 레이어마다 다름)으로
+  `draw(0..4, 0..max)`. 죽은 파티클은 버텍스 셰이더가 화면 밖으로 보낸다.
+  CPU는 "마지막 방출 시각 + 최대 수명"을 기억해 모든 파티클이 죽었는지 안다(잠들기 판단).
+- **잠들기:** `draw`가 "아직 움직이는 중"(패럴랙스가 목표에 도달하지 않음, 살아 있는 파티클이 있음, `rate > 0`)을 돌려줄 때만 다음 frame 콜백에서 다시 그린다.
+  아니면 렌더 루프를 멈추고, 포인터 이동(패럴랙스·파티클 `pointer`가 있을 때)·클릭(`burst`가 있을 때)·크기 변경·`reload`에서만 한 장 그린다. 정적인 씬은 표시 후 비용 0.
 
 ## 데몬 모듈
 
@@ -163,7 +171,7 @@ crates/waywall/src/
 │  ├─ video.rs        # GStreamer 파이프라인, 샘플 → 버퍼
 │  ├─ view.rs         # GpuView: wgpu surface, frame 콜백 페이싱, 시계, 포인터 (shader·scene 공유)
 │  ├─ shader.rs       # Shadertoy 렌더러
-│  ├─ scene/          # 씬 로더(load.rs), 렌더러(render.rs). 이후 파티클(compute), 조명, 블룸
+│  ├─ scene/          # 씬 로더(load.rs), 렌더러(render.rs), 파티클(particles.rs). 이후 조명, 블룸
 │  └─ web.rs          # 헬퍼 프로세스 관리 프록시
 ├─ visibility/
 │  ├─ mod.rs          # 사유 합성

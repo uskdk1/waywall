@@ -196,12 +196,13 @@ assets/
 │  ├─ bloom/{downsample,upsample}.wgsl
 │  ├─ vignette.wgsl
 │  ├─ lighting.wgsl         # 노멀맵 조명
-│  ├─ particles/{simulate,render}.wgsl
+│  ├─ particles/simulate.wgsl   # compute: 방출(고리 버퍼) · 적분 · curl noise · 포인터 힘
+│  ├─ particles/render.wgsl     # 인스턴스 사각형. 뒤에 스프라이트 파일이 붙어 `fn sprite(uv) -> vec4<f32>`를 정의
 │  ├─ effects/sway.wgsl     # 레이어 효과. 새 파일을 두면 새 효과 타입 (M6d)
 │  ├─ clip.wgsl             # 레이어 clip (M6d)
 │  └─ shadertoy/prelude.glsl, epilogue.glsl, prelude.wgsl   # 인터페이스 선언(uniform 블록)과 main() 래퍼
 └─ sprites/
-   └─ soft-circle.wgsl      # 텍스처 없는 파티클의 기본 스프라이트 (절차적 셰이더)
+   └─ soft-circle.wgsl      # 무늬를 정하지 않은 파티클의 기본 스프라이트 (`fn sprite`)
 ```
 
 ### `[types.<타입>]` — 배경 타입별 기본 옵션
@@ -262,11 +263,21 @@ tonemap  = "aces"
 bloom    = { threshold = 1.0, intensity = 0.5, radius = 4 }
 vignette = 0.0
 
-[types.scene.particles]    # 모든 파티클 레이어에 적용 (사용자가 적으면 scene.toml 값보다 우선)
-sprite = "sprites/soft-circle.wgsl"
-blend  = "add"
-drag   = 0.0
-emissive = 1.0
+[types.scene.particles]    # particles 레이어 필드 (사용자가 적으면 scene.toml 값보다 우선. sprite만 예외: 무늬를 정하지 않은 레이어의 기본값)
+max        = 1000
+sprite     = "sprites/soft-circle.wgsl"   # assets 기준 경로
+blend      = "add"
+emitter    = { shape = "point", rate = 10.0, burst = 0 }
+lifetime   = [1.0, 2.0]
+velocity   = { min = [0.0, 0.0], max = [0.0, 0.0] }
+gravity    = [0.0, 0.0]
+drag       = 0.0
+turbulence = { strength = 0.0, scale = 0.005, speed = 0.5 }
+size       = 4.0
+color      = "#ffffff"
+emissive   = 1.0
+pointer    = { mode = "none", radius = 200.0, strength = 300.0 }
+max_step   = 0.1          # 한 프레임 시뮬레이션의 최대 dt(초)
 
 [types.scene.light.point]
 radius = 300
