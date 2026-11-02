@@ -74,7 +74,7 @@ libav GIF 디먹서는 비flush segment seek를 처리하지 못해 GIF만 flush
 **미확인:** niri가 전체화면 창 아래 background layer에 frame 콜백을 끊는지(`Hidden` 신호원이 실제로 켜지는 경우).
 `pause_when = "never"`로 잰 첫 측정에서는 `hidden`이 한 번도 뜨지 않았으나, 그 시간에 전체화면이 있었는지는 기록하지 못함.
 
-## M6 — 씬 렌더러
+## M6 — 씬 렌더러 ✅
 - M6a: 씬 로더, image 레이어, 패럴랙스, HDR 버퍼 + 톤매핑
 - M6b: 파티클(compute 시뮬레이션, 이미터, 포인터 상호작용, 클릭 burst)
 - M6c: 조명(ambient/point/directional, 노멀맵), 블룸, 비네트, shader 레이어 + 텍스처 입력(`inputs`: `"below"` · 레이어 · 이미지 → `iChannel0..3`).
@@ -138,7 +138,7 @@ shader 레이어 `render_scale`(레이어별 렌더 해상도)을 추가하고 �
 빛줄기 예제의 일정한 샘플 간격 때문에 생긴 줄무늬(창문 모양이 사슬처럼 반복)를 픽셀마다 시작점 지터로 없앰. 단위 테스트 54개.
 **미확인:** 커서를 따라보는 눈동자(육안 확인 필요), `type = "shader"` 효과(단위 검사만, 예제 없음).
 
-## M7 — 웹 헬퍼
+## M7 — 웹 헬퍼 ✅
 - `waywall-web` 크레이트, 헬퍼 프로토콜, 프로세스 수명 관리
 - `window.waywall` API, 오디오/음소거, pause 이벤트, 헬퍼 측 frame 기아 보고
 
@@ -155,9 +155,15 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 **미확인:** `interactive = false`의 입력 통과, frame 기아로 인한 `hidden` 보고(가린 상태를 만들지 못함), 오디오 볼륨(소리 나는 예제 없음),
 모니터를 연결하기 전에 받은 `show`(연결 시 띄우기).
 
-## M8 — 예제와 마무리
+## M8 — 예제와 마무리 ✅
 - `examples/`: 셰이더, 씬(반딧불 숲), 마우스 반응 HTML, 디렉터리형 배경(`project.toml` + properties)
 - 문서 갱신, systemd user 서비스 예제, niri `spawn-at-startup` 예제
+
+**결과 (2026-11-02):** `examples/README.md`에 예제 10개(셰이더 3, 씬 5, 웹 1 + 디렉터리형 속성 덮어쓰기 방법) 정리.
+모든 예제를 여는 테스트(`examples_resolve`: 경로 해석·옵션 스키마·속성)를 추가해, 셰이더 컴파일·씬 로드 테스트와 함께
+예제가 깨지면 `nix flake check`가 실패함. 자동 시작 예제 `contrib/systemd/waywall.service`(`systemd-analyze verify` 통과,
+실행 파일 경로만 설치에 맞게 고침)와 `contrib/niri/config.kdl`(`niri validate` 통과)을 두고 `docs/setup.md`(설치·실행·자동 시작)에 설명.
+예제를 실제로 등록하지는 않음. 문서의 지난 마일스톤 표기(“M6c부터”, “M6d로”) 정리.
 
 ## 이후
 - 씬 정지 레이어 캐시: 구현·측정했으나 Iris Xe에서 이득이 없어 보류. 설계·측정·되살릴 조건·주의점은 [architecture.md](architecture.md#보류한-최적화-정지-레이어-캐시)

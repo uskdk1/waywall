@@ -128,8 +128,9 @@ waywall/
 │  ├─ waywall-web/               # 웹 헬퍼
 │  └─ waywall-proto/             # 공유 타입
 ├─ assets/                       # defaults.toml, 내장 셰이더, 스프라이트 (데이터)
+├─ contrib/                      # 자동 시작 예제: systemd user 서비스, niri 설정 조각 (docs/setup.md)
 ├─ docs/
-└─ examples/
+└─ examples/                      # 예제 배경 (examples/README.md). 전부 테스트에서 열어 봄
 ```
 
 모듈 구성은 [architecture.md](architecture.md#데몬-모듈) 참고.

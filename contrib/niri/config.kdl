@@ -1,0 +1,18 @@
+// niri 설정(~/.config/niri/config.kdl)에 넣는 waywall 예제 (docs/setup.md#niri).
+// 직접 복사해서 쓴다. systemd user 서비스를 쓰면 spawn-at-startup은 넣지 않는다(둘 다 쓰면 두 번째는 "already running"으로 끝남).
+
+// 1) 세션 시작 시 데몬 실행
+spawn-at-startup "waywall" "daemon"
+
+// 2) 단축키: 배경 일시정지/재개, 다른 배경으로 바꾸기
+binds {
+    Mod+Shift+P { spawn "waywall" "pause"; }
+    Mod+Shift+R { spawn "waywall" "resume"; }
+    Mod+Shift+W { spawn "waywall" "set" "~/Wallpapers/forest"; }
+}
+
+// 3) 오버뷰에서도 배경이 보이게 하려면 (niri 기능, 선택)
+layer-rule {
+    match namespace="^waywall$"
+    place-within-backdrop true
+}

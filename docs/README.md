@@ -27,5 +27,6 @@ waywall은 Wayland 컴포지터용 라이브 배경화면 데몬입니다. Windo
 | [wallpaper-format.md](wallpaper-format.md) | 배경 타입, `project.toml`·`scene.toml` 스펙, 셰이더/웹 배경 작성법 |
 | [config.md](config.md) | `config.toml` 스키마와 예시 |
 | [cli-ipc.md](cli-ipc.md) | CLI 명령, IPC 소켓 메시지, 웹 헬퍼 프로토콜 |
+| [setup.md](setup.md) | 설치, 데몬 실행, 자동 시작(systemd · niri) |
 | [development.md](development.md) | Nix 개발 환경, 빌드·실행·테스트 방법 |
 | [roadmap.md](roadmap.md) | 단계별 마일스톤 |

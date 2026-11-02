@@ -164,3 +164,54 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+mod example_tests {
+    use super::*;
+
+    /// `examples/<분류>/<배경>`은 전부 열리고, 옵션·속성이 스키마에 맞아야 한다 (docs/development.md#테스트-방침).
+    /// 셰이더 컴파일·씬 로드는 각 백엔드의 테스트가 한다.
+    #[test]
+    fn examples_resolve() {
+        let l = crate::config::Layers::load_for_test("");
+        let detect = l.global().unwrap().detect;
+        let cfg = l.output("X").unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let mut n = 0;
+        for group in std::fs::read_dir(&root).unwrap() {
+            let group = group.unwrap().path();
+            if !group.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&group).unwrap() {
+                let path = entry.unwrap().path();
+                let wp = resolve(path.to_str().unwrap(), &detect, Path::new("/"))
+                    .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+                crate::properties::resolve(wp.properties.as_ref(), &cfg.properties)
+                    .unwrap_or_else(|e| panic!("{}: properties: {e:#}", path.display()));
+                use waywall_proto::config::{
+                    ImageOptions, SceneOptions, ShaderOptions, VideoOptions, WebOptions,
+                };
+                let o = wp.options.as_ref();
+                let checked = match wp.kind {
+                    WallpaperKind::Image => {
+                        l.type_options::<ImageOptions>(wp.kind, o, &cfg).map(drop)
+                    }
+                    WallpaperKind::Video => {
+                        l.type_options::<VideoOptions>(wp.kind, o, &cfg).map(drop)
+                    }
+                    WallpaperKind::Shader => {
+                        l.type_options::<ShaderOptions>(wp.kind, o, &cfg).map(drop)
+                    }
+                    WallpaperKind::Scene => {
+                        l.type_options::<SceneOptions>(wp.kind, o, &cfg).map(drop)
+                    }
+                    WallpaperKind::Web => l.type_options::<WebOptions>(wp.kind, o, &cfg).map(drop),
+                };
+                checked.unwrap_or_else(|e| panic!("{}: options: {e:#}", path.display()));
+                n += 1;
+            }
+        }
+        assert!(n >= 9, "found {n} examples");
+    }
+}

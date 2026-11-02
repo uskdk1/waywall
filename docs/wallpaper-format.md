@@ -381,7 +381,7 @@ inputs = { iChannel0 = "below", iChannel1 = "textures/light_mask.png", iChannel2
 | `turbulence` | `{ strength, scale, speed }` curl noise 흐름. `strength`는 흐름 속도(px/s), `scale`은 노이즈 주파수(1/px), `speed`는 흐름이 바뀌는 빠르기 |
 | `size` | 지름(px). 숫자 또는 `{ start, end }` (수명에 따라 보간) |
 | `color` | 색(RGBA). 값 하나 또는 `{ start, end }`. 끝 색의 알파를 0으로 하면 사라지며 꺼짐 |
-| `emissive` | 색에 곱하는 HDR 밝기 배율. 1보다 크면 블룸(M6c)으로 번짐 |
+| `emissive` | 색에 곱하는 HDR 밝기 배율. 1보다 크면 블룸으로 번짐 |
 | `pointer` | `{ mode, radius, strength }` 포인터 상호작용. `mode`: `none` · `attract`(끌어당김) · `repel`(밀어냄). `radius` 안에서 `strength`(px/s²)의 힘, 가장자리로 갈수록 약해짐 |
 | `max_step` | 한 프레임 시뮬레이션의 최대 시간 간격(초). 오래 멈췄다 깨어나도 파티클이 튀거나 한꺼번에 나오지 않게 함 |
 
@@ -489,7 +489,7 @@ HDR 장면 ─▶ + 블룸 × intensity ─▶ × exposure ─▶ tonemap ─▶
 
 ### 구현 상태
 
-M6d로 이 문서의 씬 기능이 모두 동작합니다. 레이어 타입이 지원하지 않는 필드(예: particles의 `clip`)를 쓰면
+이 문서의 씬 기능은 모두 동작합니다. 레이어 타입이 지원하지 않는 필드(예: particles의 `clip`)를 쓰면
 배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다.
 
 ### 레이어 효과 (`effects`)
@@ -569,6 +569,8 @@ follow = { anchor = [812, 403], max_offset = [6, 4], range = 600, smoothing = 0.
 목표에 닿으면(`[types.scene] settle_px` 미만) 멈추고 잠듭니다.
 
 ### 예: 햇빛 + 흔들리는 머리카락 + 따라보는 눈
+
+실제로 동작하는 예제: [examples/scenes/character/](../examples/scenes/character/).
 
 원본 그림을 레이어로 나눈 PNG가 필요합니다(배경, 캐릭터, 흰자, 눈동자, 머리카락 마스크).
 

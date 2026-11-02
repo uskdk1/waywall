@@ -231,7 +231,7 @@ crates/waywall/src/
 │  ├─ mod.rs          # SCTK 핸들러 (출력, layer, seat/포인터 + 커서, scale)
 │  ├─ globals.rs      # SCTK가 감싸지 않는 전역 객체: viewporter, fractional-scale, single-pixel-buffer
 │  ├─ output.rs       # Output: layer surface, 단색 버퍼, 이미지 서브서피스, viewport
-│  └─ dmabuf.rs       # (M4) linux-dmabuf feedback, wl_buffer 생성/캐시
+│  └─ dmabuf.rs       # linux-dmabuf feedback, wl_buffer 생성/캐시
 ├─ fit.rs             # fit 모드 → viewporter source/destination, downscale 크기
 ├─ gpu/
 │  ├─ mod.rs          # Gpu 지연 생성, Surface 구성
