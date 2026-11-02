@@ -1,0 +1,54 @@
+# M6c 예제: 조명 + 노멀맵 (docs/wallpaper-format.md#조명).
+# 커서를 따라가는 등불이 벽돌의 요철을 드러내고, 왼쪽 위 횃불은 흔들린다.
+
+[scene]
+width  = 1920
+height = 1080
+fit    = "cover"
+clear  = "#000000"
+
+[[layer]]
+type       = "image"
+id         = "wall"
+texture    = "textures/wall.jpg"     # 960×540
+normal_map = "textures/normal.png"
+scale      = 2.0
+lit        = true
+
+[[layer]]
+type     = "particles"
+id       = "embers"
+max      = 400
+emitter  = { shape = "circle", position = [360, 300], radius = 18, rate = 40 }
+lifetime = [0.8, 1.8]
+velocity = { min = [-20, -90], max = [20, -40] }
+turbulence = { strength = 30, scale = 0.02, speed = 1.0 }
+size     = { start = 5, end = 1 }
+color    = { start = "#ffb050", end = "#ff400000" }
+emissive = 4.0
+
+[[light]]
+type      = "ambient"
+color     = "#1c1a26"
+
+[[light]]
+type      = "point"
+position  = "pointer"
+color     = "$lamp"
+intensity = 2.2
+radius    = 650
+height    = 90
+
+[[light]]
+type          = "point"
+position      = [360, 300]
+color         = "#ff9a40"
+intensity     = 1.8
+radius        = 520
+height        = 60
+flicker       = 0.35
+flicker_speed = 9.0
+
+[post]
+tonemap = "agx"
+bloom   = { threshold = 1.0, intensity = 0.6, radius = 5 }

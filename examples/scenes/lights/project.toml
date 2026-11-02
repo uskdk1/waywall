@@ -1,0 +1,11 @@
+[wallpaper]
+name  = "Torchlit Wall"
+type  = "scene"
+entry = "scene.toml"
+
+[options]
+interactive = true
+
+[properties.lamp]
+type    = "color"
+default = "#ffd29a"

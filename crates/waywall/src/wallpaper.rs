@@ -17,8 +17,9 @@ pub struct Wallpaper {
     pub name: String,
     /// 배경 작성자의 옵션 (project.toml `[options]`).
     pub options: Option<Table>,
-    #[allow(dead_code)] // M3부터 사용
     pub properties: Option<Table>,
+    /// shader 배경의 `[inputs]`.
+    pub inputs: Option<Table>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub fn resolve(spec: &str, detect: &Detect, base: &Path) -> Result<Wallpaper> {
             name: spec.to_owned(),
             options: None,
             properties: None,
+            inputs: None,
         });
     }
 
@@ -56,6 +58,7 @@ pub fn resolve(spec: &str, detect: &Detect, base: &Path) -> Result<Wallpaper> {
         source: Source::File(path),
         options: None,
         properties: None,
+        inputs: None,
     })
 }
 
@@ -70,6 +73,9 @@ fn resolve_project(dir: &Path, detect: &Detect) -> Result<Wallpaper> {
     })?;
     let project: Project =
         toml::from_str(&text).with_context(|| format!("invalid {}", file.display()))?;
+    if project.inputs.is_some() && project.wallpaper.kind != WallpaperKind::Shader {
+        bail!("{}: [inputs] is only for type = \"shader\"", file.display());
+    }
     let entry = dir.join(&project.wallpaper.entry);
     if !entry.is_file() {
         bail!("{}: entry {} not found", file.display(), entry.display());
@@ -80,6 +86,7 @@ fn resolve_project(dir: &Path, detect: &Detect) -> Result<Wallpaper> {
         name: project.wallpaper.name,
         options: project.options,
         properties: project.properties,
+        inputs: project.inputs,
     })
 }
 

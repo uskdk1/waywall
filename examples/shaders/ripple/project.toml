@@ -1,0 +1,10 @@
+[wallpaper]
+name  = "Ripple"
+type  = "shader"
+entry = "ripple.glsl"
+
+[options]
+interactive = true
+
+[inputs]
+iChannel0 = { source = "textures/up.png", wrap = "mirror" }

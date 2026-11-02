@@ -72,6 +72,10 @@ render_scale = 1.0
 interactive  = true
 background   = "#000000"     # 첫 프레임 전에 보이는 색
 
+[types.shader.channel]       # [inputs] 채널에서 생략한 값
+filter = "linear"            # linear | nearest
+wrap   = "repeat"            # repeat | clamp | mirror
+
 [types.scene]
 fps          = 0
 render_scale = 1.0
@@ -96,6 +100,7 @@ visible  = true
 [types.scene.image]
 scale    = 1.0               # 숫자 또는 [x, y]
 rotation = 0.0               # 도, 시계 방향
+lit      = false             # true면 [[light]]의 영향을 받음
 
 [types.scene.particles]
 max        = 1000            # GPU 버퍼 크기. 모자라면 오래된 파티클부터 바뀜
@@ -113,11 +118,25 @@ emissive   = 1.0
 pointer    = { mode = "none", radius = 200.0, strength = 300.0 }  # none | attract | repel, px, px/s²
 max_step   = 0.1             # 한 프레임 시뮬레이션의 최대 dt(초)
 
-[types.scene.light.point]
-radius    = 300.0
-height    = 100.0
+[types.scene.shader]
+channel = { filter = "linear", wrap = "clamp" }   # inputs 채널에서 생략한 값
+
+[types.scene.light.ambient]  # [[light]]에서 생략한 필드
+color     = "#ffffff"
 intensity = 1.0
-flicker   = 0.0
+
+[types.scene.light.point]
+color     = "#ffffff"
+intensity = 1.0
+radius    = 300.0            # 설계 px, 이 거리에서 0
+height    = 100.0            # 화면 위로 떠 있는 높이 (설계 px)
+flicker   = 0.0              # 0–1 밝기 흔들림
+flicker_speed = 8.0          # 흔들림이 바뀌는 빈도 (초당)
+
+[types.scene.light.directional]
+color     = "#ffffff"
+intensity = 1.0
+direction = [0.0, 0.0, -1.0] # x 오른쪽, y 아래, z 보는 사람 쪽
 
 [types.web]
 background  = "#000000"

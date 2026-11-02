@@ -1,0 +1,24 @@
+# M6c 예제: shader 레이어 + "below" 입력 (docs/wallpaper-format.md#레이어-타입).
+# 아래 그림의 밝은 부분(해)에서 빛줄기가 뻗는다. 커서를 올리면 그 위치가 광원이 된다.
+
+[scene]
+width  = 1920
+height = 1080
+fit    = "cover"
+clear  = "#000000"
+
+[[layer]]
+type    = "image"
+id      = "photo"
+texture = "textures/photo.jpg"   # 960×540
+scale   = 2.0
+
+[[layer]]
+type   = "shader"
+id     = "rays"
+source = "sunlight.glsl"
+inputs = { iChannel0 = "below" }
+blend  = "add"
+
+[post]
+tonemap = "agx"

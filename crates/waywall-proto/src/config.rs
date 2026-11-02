@@ -196,6 +196,31 @@ pub struct ShaderOptions {
     pub interactive: bool,
     /// 첫 프레임 전에 보이는 부모 surface 색.
     pub background: Color,
+    /// `[inputs]` 채널에서 생략한 값.
+    pub channel: ChannelDefaults,
+}
+
+/// 텍스처 채널의 샘플링 (docs/wallpaper-format.md#텍스처-입력-ichannel0ichannel3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelDefaults {
+    pub filter: ChannelFilter,
+    pub wrap: ChannelWrap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChannelFilter {
+    Linear,
+    Nearest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChannelWrap {
+    Repeat,
+    Clamp,
+    Mirror,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +239,7 @@ pub struct SceneOptions {
     /// 레이어 필드의 내장값/사용자 값. 레이어마다 병합하는 쪽은 데몬의 씬 로더.
     pub layer: SceneLayerDefaults,
     pub image: SceneImageDefaults,
+    pub shader: SceneShaderDefaults,
     pub particles: SceneParticleDefaults,
     pub light: SceneLightDefaults,
 }
@@ -249,6 +275,13 @@ pub struct SceneLayerDefaults {
 pub struct SceneImageDefaults {
     pub scale: Scale,
     pub rotation: f64,
+    pub lit: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SceneShaderDefaults {
+    pub channel: ChannelDefaults,
 }
 
 /// 숫자 하나(가로세로 같음) 또는 `[x, y]`.
@@ -379,16 +412,35 @@ impl<T: Copy> Ramp<T> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SceneLightDefaults {
+    pub ambient: AmbientLightDefaults,
     pub point: PointLightDefaults,
+    pub directional: DirectionalLightDefaults,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmbientLightDefaults {
+    pub color: Color,
+    pub intensity: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectionalLightDefaults {
+    pub color: Color,
+    pub intensity: f64,
+    pub direction: [f64; 3],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PointLightDefaults {
+    pub color: Color,
+    pub intensity: f64,
     pub radius: f64,
     pub height: f64,
-    pub intensity: f64,
     pub flicker: f64,
+    pub flicker_speed: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

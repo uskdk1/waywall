@@ -1,0 +1,17 @@
+[wallpaper]
+name  = "Sunlight"
+type  = "scene"
+entry = "scene.toml"
+
+[options]
+interactive = true
+
+[properties.strength]
+type    = "float"
+default = 1.4
+min     = 0.0
+max     = 4.0
+
+[properties.sun]
+type    = "color"
+default = "#ffd9a0"

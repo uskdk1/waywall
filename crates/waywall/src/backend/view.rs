@@ -14,7 +14,7 @@ use waywall_proto::Color;
 use waywall_proto::config::{PresentMode, Render};
 
 use crate::backend::scene::{SceneRenderer, SceneSpec};
-use crate::backend::shader::{ShaderRenderer, ShaderSpec};
+use crate::backend::shader::{ShaderBackground, ShaderSpec};
 use crate::daemon::State;
 use crate::gpu::Gpu;
 use crate::wayland::output::DesyncPlane;
@@ -56,7 +56,7 @@ pub struct GpuSpec {
 }
 
 enum Renderer {
-    Shader(ShaderRenderer),
+    Shader(ShaderBackground),
     Scene(Box<SceneRenderer>),
 }
 
@@ -194,7 +194,7 @@ impl GpuView {
 
         let renderer = match spec.renderer {
             RendererSpec::Shader(s) => {
-                Renderer::Shader(ShaderRenderer::new(gpu, *s, view_format, &spec.name)?)
+                Renderer::Shader(ShaderBackground::new(gpu, *s, view_format, &spec.name)?)
             }
             RendererSpec::Scene(s) => Renderer::Scene(Box::new(SceneRenderer::new(
                 gpu,

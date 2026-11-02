@@ -4,7 +4,7 @@
 //! 표 수준에서 병합한 뒤 엄격한 스키마로 역직렬화하므로 모르는 필드는 오류다.
 //! 예외는 파티클 `sprite`: 레이어가 무늬(`texture`/`sprite`)를 정했으면 사용자 값이 그것을 덮지 않는다.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -13,23 +13,32 @@ use toml::{Table, Value};
 use waywall_proto::Color;
 use waywall_proto::color::{linear_to_srgb, srgb_to_linear};
 use waywall_proto::config::{
-    Blend, Emitter, EmitterShape, ParticlePointer, PointerMode, Ramp, Scale, SceneOptions, Span,
-    Turbulence, VelocityRange,
+    Blend, ChannelDefaults, Emitter, EmitterShape, ParticlePointer, PointerMode, Ramp, Scale,
+    SceneOptions, Span, Turbulence, VelocityRange,
 };
 use waywall_proto::project::WallpaperKind;
 
-use super::{ImageLayer, Layer, ParticleLayer, SceneSpec, Texture};
+use super::{
+    ChannelInput, ImageLayer, Layer, Light, ParticleLayer, SceneSpec, ShaderLayer, Texture,
+};
 use crate::assets::Assets;
+use crate::backend::shader::{CHANNEL_NAMES, CHANNEL_SECTION, CHANNELS, parse_inputs};
 use crate::config::{Layers, OutputConfig, merge};
 use crate::gpu::compile_wgsl;
+use crate::gpu::shadertoy::{self, Language};
 use crate::properties::{self, PropValue, Property};
 use crate::wallpaper::Wallpaper;
 
 const IMAGE_SHADER: &str = "shaders/scene/image.wgsl";
+const LIGHTING_SHADER: &str = "shaders/scene/lighting.wgsl";
 const POST_SHADER: &str = "shaders/scene/post.wgsl";
 const TONEMAP_DIR: &str = "shaders/tonemap";
+const VIGNETTE_SHADER: &str = "shaders/vignette.wgsl";
+const BLOOM_DOWN_SHADER: &str = "shaders/bloom/downsample.wgsl";
+const BLOOM_UP_SHADER: &str = "shaders/bloom/upsample.wgsl";
 const SIMULATE_SHADER: &str = "shaders/particles/simulate.wgsl";
 const PARTICLE_SHADER: &str = "shaders/particles/render.wgsl";
+const INPUT_SHADER: &str = "shaders/scene/input.wgsl";
 const PROPERTY_SIGIL: char = '$';
 /// `scene.toml` 최상위 섹션.
 const TOP_KEYS: [&str; 4] = ["scene", "layer", "light", "post"];
@@ -40,18 +49,15 @@ const SCENE_SIZE_KEYS: [&str; 2] = ["width", "height"];
 const COMMON_SECTION: &str = "layer";
 const IMAGE: &str = "image";
 const PARTICLES: &str = "particles";
+const SHADER: &str = "shader";
+/// shader 레이어 입력: 이 레이어 아래에 지금까지 그려진 장면.
+const BELOW: &str = "below";
 /// 파티클 무늬를 정하는 레이어 필드.
 const LOOK_KEYS: [&str; 2] = ["texture", "sprite"];
 const SPRITE_KEY: &str = "sprite";
 /// 아직 없는 기능: (필드 또는 레이어 타입, 들어오는 마일스톤).
-const NOT_YET_TYPES: [(&str, &str); 1] = [("shader", "M6c")];
-const NOT_YET_FIELDS: [(&str, &str); 5] = [
-    ("normal_map", "M6c"),
-    ("lit", "M6c"),
-    ("clip", "M6d"),
-    ("follow", "M6d"),
-    ("effects", "M6d"),
-];
+const NOT_YET_TYPES: [(&str, &str); 0] = [];
+const NOT_YET_FIELDS: [(&str, &str); 3] = [("clip", "M6d"), ("follow", "M6d"), ("effects", "M6d")];
 
 /// image 레이어 (병합 후). 필드 설명은 docs/wallpaper-format.md#레이어-타입.
 #[derive(Debug, Deserialize)]
@@ -68,6 +74,26 @@ struct ImageLayerDef {
     position: Option<[f64; 2]>,
     scale: Scale,
     rotation: f64,
+    lit: bool,
+    normal_map: Option<String>,
+}
+
+/// shader 레이어 (병합 후).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShaderLayerDef {
+    #[serde(rename = "type")]
+    _kind: String,
+    id: Option<String>,
+    blend: Blend,
+    opacity: f64,
+    parallax: f64,
+    visible: bool,
+    source: String,
+    rect: Option<[f64; 4]>,
+    inputs: Option<Table>,
+    /// 채널에서 생략한 filter·wrap.
+    channel: ChannelDefaults,
 }
 
 /// particles 레이어 (병합 후).
@@ -97,8 +123,46 @@ struct ParticleLayerDef {
     max_step: f64,
 }
 
+/// `[[light]]` (병합 후). 필드 설명은 docs/wallpaper-format.md#조명.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+enum LightDef {
+    Ambient {
+        color: Color,
+        intensity: f64,
+    },
+    Point {
+        #[serde(default)]
+        position: Option<LightPosition>,
+        color: Color,
+        intensity: f64,
+        radius: f64,
+        height: f64,
+        flicker: f64,
+        flicker_speed: f64,
+    },
+    Directional {
+        direction: [f64; 3],
+        color: Color,
+        intensity: f64,
+    },
+}
+
+/// `[x, y]` 또는 `"pointer"`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LightPosition {
+    At([f64; 2]),
+    Named(String),
+}
+
+const LIGHT_TYPES: [&str; 3] = ["ambient", "point", "directional"];
+const LIGHT_SECTION: &str = "light";
+const POINTER: &str = "pointer";
+
 enum LayerDef {
     Image(ImageLayerDef),
+    Shader(Box<ShaderLayerDef>),
     /// `bool`: `sprite`가 레이어 자신의 값(배경 디렉터리 기준)인지. 아니면 assets 기준.
     Particles(Box<ParticleLayerDef>, bool),
 }
@@ -107,6 +171,7 @@ impl LayerDef {
     fn id(&self) -> Option<&String> {
         match self {
             LayerDef::Image(d) => d.id.as_ref(),
+            LayerDef::Shader(d) => d.id.as_ref(),
             LayerDef::Particles(d, _) => d.id.as_ref(),
         }
     }
@@ -114,6 +179,7 @@ impl LayerDef {
     fn visible(&self) -> bool {
         match self {
             LayerDef::Image(d) => d.visible,
+            LayerDef::Shader(d) => d.visible,
             LayerDef::Particles(d, _) => d.visible,
         }
     }
@@ -121,6 +187,7 @@ impl LayerDef {
     fn texture(&self) -> Option<&String> {
         match self {
             LayerDef::Image(d) => Some(&d.texture),
+            LayerDef::Shader(_) => None,
             LayerDef::Particles(d, _) => d.texture.as_ref(),
         }
     }
@@ -148,27 +215,64 @@ pub fn load(
     merge(&mut author, &doc.options);
     let opts: SceneOptions = layers.type_options(WallpaperKind::Scene, Some(&author), cfg)?;
 
-    let image_shader = compile_wgsl(IMAGE_SHADER, &asset_text(assets, IMAGE_SHADER)?)?;
+    let image_shader = compile_image(assets)?;
     let post_shader = compile_post(assets, &opts.post.tonemap)?;
     let simulate_shader = compile_wgsl(SIMULATE_SHADER, &asset_text(assets, SIMULATE_SHADER)?)?;
+    let input_shader = compile_wgsl(INPUT_SHADER, &asset_text(assets, INPUT_SHADER)?)?;
 
     let user_common = layers.user_type_section(WallpaperKind::Scene, COMMON_SECTION);
     let mut defs = Vec::new();
-    let mut ids = HashSet::new();
+    let mut index = HashMap::new();
     for (i, raw) in doc.layers.into_iter().enumerate() {
         let def = layer_def(i, raw, &opts, user_common, layers)?;
         let id = def.id().cloned().unwrap_or_else(|| format!("layer{i}"));
-        ensure!(ids.insert(id.clone()), "duplicate layer id `{id}`");
-        if def.visible() {
-            defs.push((id, def));
-        }
+        ensure!(
+            index.insert(id.clone(), i).is_none(),
+            "duplicate layer id `{id}`"
+        );
+        defs.push((id, def));
     }
+
+    // shader 레이어의 채널 입력. 레이어 id는 그보다 아래 레이어만 가리킬 수 있고,
+    // 입력으로 쓰이는 레이어는 visible = false여도 남긴다(그리지는 않음).
+    let user_channel = layers
+        .user_type_section(WallpaperKind::Scene, SHADER)
+        .and_then(|t| t.get(CHANNEL_SECTION))
+        .and_then(Value::as_table);
+    let mut channel_defs = Vec::with_capacity(defs.len());
+    let mut referenced = HashSet::new();
+    for (k, (id, def)) in defs.iter().enumerate() {
+        let LayerDef::Shader(d) = def else {
+            channel_defs.push(Default::default());
+            continue;
+        };
+        let parsed = parse_inputs(d.inputs.as_ref(), &d.channel, user_channel)
+            .with_context(|| format!("layer `{id}`"))?;
+        for c in parsed.iter().flatten() {
+            if let Some(&j) = index.get(&c.source) {
+                ensure!(
+                    j < k,
+                    "layer `{id}`: input `{}` must be a layer below it",
+                    c.source
+                );
+                referenced.insert(j);
+            }
+        }
+        channel_defs.push(parsed);
+    }
+    let kept: Vec<usize> = (0..defs.len())
+        .filter(|i| defs[*i].1.visible() || referenced.contains(i))
+        .collect();
+    let new_index: HashMap<usize, usize> = kept.iter().enumerate().map(|(n, &o)| (o, n)).collect();
+    let mut defs: Vec<_> = defs.into_iter().zip(channel_defs).enumerate().collect();
+    defs.retain(|(i, _)| new_index.contains_key(i));
+    let drawn: Vec<bool> = defs.iter().map(|(_, ((_, d), _))| d.visible()).collect();
 
     // 디코딩은 텍스처마다 스레드 하나로 병렬 처리하고 모두 끝날 때까지 기다린다.
     let textures: Vec<Option<Result<Texture>>> = std::thread::scope(|s| {
         let handles: Vec<_> = defs
             .iter()
-            .map(|(id, def)| {
+            .map(|(_, ((id, def), _))| {
                 let path = base.join(def.texture()?);
                 Some(s.spawn(move || {
                     decode(&path).with_context(|| format!("layer `{id}`: {}", path.display()))
@@ -186,19 +290,32 @@ pub fn load(
             .collect()
     });
     let mut scene_layers = Vec::with_capacity(defs.len());
-    for ((id, def), texture) in defs.into_iter().zip(textures) {
+    for ((_, ((id, def), channels)), texture) in defs.into_iter().zip(textures) {
         let texture = texture.transpose()?;
         scene_layers.push(match def {
-            LayerDef::Image(d) => Layer::Image(ImageLayer {
-                id,
-                blend: d.blend,
-                opacity: d.opacity,
-                parallax: d.parallax,
-                position: d.position.unwrap_or([doc.size[0] / 2.0, doc.size[1] / 2.0]),
-                scale: d.scale.xy(),
-                rotation: d.rotation,
-                texture: texture.context("image layer without a texture")?,
-            }),
+            LayerDef::Image(d) => {
+                let normal_map = d
+                    .normal_map
+                    .as_ref()
+                    .map(|n| {
+                        let file = base.join(n);
+                        decode_raw(&file)
+                            .with_context(|| format!("layer `{id}`: normal_map {}", file.display()))
+                    })
+                    .transpose()?;
+                Layer::Image(ImageLayer {
+                    id,
+                    blend: d.blend,
+                    opacity: d.opacity,
+                    parallax: d.parallax,
+                    position: d.position.unwrap_or([doc.size[0] / 2.0, doc.size[1] / 2.0]),
+                    scale: d.scale.xy(),
+                    rotation: d.rotation,
+                    texture: texture.context("image layer without a texture")?,
+                    lit: d.lit,
+                    normal_map,
+                })
+            }
             LayerDef::Particles(d, own_sprite) => {
                 let sprite = if own_sprite {
                     let path = base.join(&d.sprite);
@@ -214,20 +331,97 @@ pub fn load(
                 .with_context(|| format!("layer `{id}`"))?;
                 Layer::Particles(Box::new(particle_layer(id, *d, texture, shader, doc.size)))
             }
+            LayerDef::Shader(d) => {
+                let path = base.join(&d.source);
+                let text = std::fs::read_to_string(&path)
+                    .with_context(|| format!("layer `{id}`: {}", path.display()))?;
+                let lang = Language::from_path(&path);
+                let compiled = shadertoy::compile(assets, lang, &text, &props, &d.source)
+                    .with_context(|| format!("layer `{id}`"))?;
+                let mut inputs: [Option<ChannelInput>; CHANNELS] = Default::default();
+                let mut sampling = [d.channel; CHANNELS];
+                for (i, c) in channels.into_iter().enumerate() {
+                    let Some(c) = c else { continue };
+                    sampling[i] = c.sampling;
+                    inputs[i] = Some(if c.source == BELOW {
+                        ChannelInput::Below
+                    } else if let Some(j) = index.get(&c.source) {
+                        ChannelInput::Layer(new_index[j])
+                    } else {
+                        let file = base.join(&c.source);
+                        let mut t = decode(&file).with_context(|| {
+                            format!("layer `{id}`: {}: {}", CHANNEL_NAMES[i], file.display())
+                        })?;
+                        if lang == Language::Glsl {
+                            flip_rows(&mut t);
+                        }
+                        ChannelInput::Image(t)
+                    });
+                }
+                Layer::Shader(Box::new(ShaderLayer {
+                    id,
+                    blend: d.blend,
+                    opacity: d.opacity,
+                    parallax: d.parallax,
+                    rect: d.rect.unwrap_or([0.0, 0.0, doc.size[0], doc.size[1]]),
+                    compiled,
+                    props: props.clone(),
+                    lang,
+                    inputs,
+                    sampling,
+                }))
+            }
         });
     }
 
+    let user_lights = layers.user_type_section(WallpaperKind::Scene, LIGHT_SECTION);
+    let scene_lights = doc
+        .lights
+        .into_iter()
+        .enumerate()
+        .map(|(i, raw)| light(i, raw, &opts, user_lights, doc.size))
+        .collect::<Result<Vec<_>>>()?;
+    let lit = scene_layers
+        .iter()
+        .any(|l| matches!(l, Layer::Image(i) if i.lit));
+    ensure!(
+        !lit || !scene_lights.is_empty(),
+        "a layer has `lit = true` but the scene has no [[light]]"
+    );
+    let post = &opts.post;
+    ensure!(
+        post.bloom.intensity >= 0.0 && post.bloom.threshold >= 0.0,
+        "[post] bloom: `intensity` and `threshold` must be >= 0"
+    );
+    ensure!(
+        (0.0..=1.0).contains(&post.vignette),
+        "[post] vignette must be 0–1"
+    );
+    let bloom_shaders = if post.bloom.intensity > 0.0 && post.bloom.radius > 0 {
+        Some((
+            compile_wgsl(BLOOM_DOWN_SHADER, &asset_text(assets, BLOOM_DOWN_SHADER)?)?,
+            compile_wgsl(BLOOM_UP_SHADER, &asset_text(assets, BLOOM_UP_SHADER)?)?,
+        ))
+    } else {
+        None
+    };
     let spec = SceneSpec {
         size: doc.size,
         fit: opts.fit,
         clear: opts.clear,
         exposure: opts.post.exposure,
+        bloom: opts.post.bloom.clone(),
+        vignette: opts.post.vignette,
+        bloom_shaders,
         pointer_smoothing: opts.pointer_smoothing,
         settle_px: opts.settle_px,
         layers: scene_layers,
+        drawn,
+        lights: scene_lights,
         image_shader,
         post_shader,
         simulate_shader,
+        input_shader,
     };
     Ok((spec, opts))
 }
@@ -280,6 +474,7 @@ struct SceneDoc {
     /// 배경 옵션으로 병합할 작성자 값 (`fit`, `clear`, `post`).
     options: Table,
     layers: Vec<Table>,
+    lights: Vec<Table>,
 }
 
 impl SceneDoc {
@@ -287,10 +482,18 @@ impl SceneDoc {
         if let Some(k) = doc.keys().find(|k| !TOP_KEYS.contains(&k.as_str())) {
             bail!("unknown section `{k}` (scene | layer | light | post)");
         }
-        if let Some(lights) = doc.remove("light") {
-            let empty = lights.as_array().is_some_and(Vec::is_empty);
-            ensure!(empty, "[[light]] is not supported yet (M6c)");
-        }
+        let lights = match doc.remove(LIGHT_SECTION) {
+            None => Vec::new(),
+            Some(Value::Array(a)) => a
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| match v {
+                    Value::Table(t) => Ok(t),
+                    _ => bail!("[[light]] #{i} must be a table"),
+                })
+                .collect::<Result<_>>()?,
+            Some(_) => bail!("`light` must be an array of tables ([[light]])"),
+        };
         let mut scene = match doc.remove("scene") {
             Some(Value::Table(t)) => t,
             Some(_) => bail!("[scene] must be a table"),
@@ -332,6 +535,7 @@ impl SceneDoc {
             size,
             options,
             layers,
+            lights,
         })
     }
 }
@@ -359,6 +563,7 @@ fn layer_def(
     let type_defaults = match kind.as_str() {
         IMAGE => Table::try_from(&opts.image)?,
         PARTICLES => Table::try_from(&opts.particles)?,
+        SHADER => Table::try_from(&opts.shader)?,
         _ => bail!(
             "{}: unknown layer type `{kind}` (image | particles | shader)",
             ctx()
@@ -384,12 +589,117 @@ fn layer_def(
         }
         merge(&mut t, &u);
     }
-    if kind == IMAGE {
-        return Ok(LayerDef::Image(t.try_into().with_context(ctx)?));
+    match kind.as_str() {
+        IMAGE => return Ok(LayerDef::Image(t.try_into().with_context(ctx)?)),
+        SHADER => {
+            let d: ShaderLayerDef = t.try_into().with_context(ctx)?;
+            if let Some(r) = d.rect {
+                ensure!(
+                    r[2] > 0.0 && r[3] > 0.0,
+                    "{}: `rect` size must be positive",
+                    ctx()
+                );
+            }
+            return Ok(LayerDef::Shader(Box::new(d)));
+        }
+        _ => {}
     }
     let d: ParticleLayerDef = t.try_into().with_context(ctx)?;
     check_particles(&d).with_context(ctx)?;
     Ok(LayerDef::Particles(Box::new(d), own_sprite))
+}
+
+/// `[[light]]` 하나: 계층은 레이어 필드와 같다 (defaults < 씬 < 사용자 `[types.scene.light.<타입>]`).
+fn light(
+    i: usize,
+    raw: Table,
+    opts: &SceneOptions,
+    user: Option<&Table>,
+    design: [f64; 2],
+) -> Result<Light> {
+    let ctx = || format!("[[light]] #{i}");
+    let kind = raw
+        .get("type")
+        .and_then(Value::as_str)
+        .with_context(|| format!("{}: missing `type`", ctx()))?
+        .to_owned();
+    let defaults = Table::try_from(&opts.light)?;
+    let Some(Value::Table(base)) = defaults.get(&kind) else {
+        bail!(
+            "{}: unknown light type `{kind}` ({})",
+            ctx(),
+            LIGHT_TYPES.join(" | ")
+        );
+    };
+    let mut t = base.clone();
+    merge(&mut t, &raw);
+    if let Some(Value::Table(u)) = user.and_then(|u| u.get(&kind)) {
+        merge(&mut t, u);
+    }
+    let rgb = |c: Color, k: f64| {
+        let [r, g, b, _] = c.to_linear_premultiplied();
+        [r * k, g * k, b * k]
+    };
+    Ok(match t.try_into::<LightDef>().with_context(ctx)? {
+        LightDef::Ambient { color, intensity } => Light::Ambient {
+            color: rgb(color, intensity),
+        },
+        LightDef::Point {
+            position,
+            color,
+            intensity,
+            radius,
+            height,
+            flicker,
+            flicker_speed,
+        } => {
+            ensure!(radius > 0.0, "{}: `radius` must be positive", ctx());
+            ensure!(
+                (0.0..=1.0).contains(&flicker),
+                "{}: `flicker` must be 0–1",
+                ctx()
+            );
+            ensure!(
+                flicker_speed >= 0.0,
+                "{}: `flicker_speed` must be >= 0",
+                ctx()
+            );
+            let position = match position {
+                None => Some([design[0] / 2.0, design[1] / 2.0]),
+                Some(LightPosition::At(p)) => Some(p),
+                Some(LightPosition::Named(n)) if n == POINTER => None,
+                Some(LightPosition::Named(n)) => {
+                    bail!(
+                        "{}: `position` must be [x, y] or \"{POINTER}\" (got `{n}`)",
+                        ctx()
+                    )
+                }
+            };
+            Light::Point {
+                position,
+                color: rgb(color, intensity),
+                radius,
+                height,
+                flicker,
+                flicker_speed,
+            }
+        }
+        LightDef::Directional {
+            direction,
+            color,
+            intensity,
+        } => {
+            ensure!(
+                direction.iter().any(|v| *v != 0.0),
+                "{}: `direction` must not be zero",
+                ctx()
+            );
+            Light::Directional {
+                direction,
+                color: rgb(color, intensity),
+            }
+        }
+    })
 }
 
 fn check_particles(d: &ParticleLayerDef) -> Result<()> {
@@ -430,6 +740,22 @@ fn check_particles(d: &ParticleLayerDef) -> Result<()> {
     Ok(())
 }
 
+/// RGBA8 행을 위아래로 뒤집는다 (GLSL 채널은 Shadertoy처럼 uv (0, 0)이 왼쪽 아래).
+fn flip_rows(t: &mut Texture) {
+    let row = t.width as usize * 4;
+    let rows: Vec<Vec<u8>> = t.data.chunks(row).rev().map(<[u8]>::to_vec).collect();
+    t.data = rows.concat();
+}
+
+fn compile_image(assets: &Assets) -> Result<naga::Module> {
+    let src = format!(
+        "{}\n{}",
+        asset_text(assets, IMAGE_SHADER)?,
+        asset_text(assets, LIGHTING_SHADER)?
+    );
+    compile_wgsl(&format!("{IMAGE_SHADER} + {LIGHTING_SHADER}"), &src)
+}
+
 fn compile_post(assets: &Assets, tonemap: &str) -> Result<naga::Module> {
     let valid = !tonemap.is_empty()
         && tonemap
@@ -441,12 +767,16 @@ fn compile_post(assets: &Assets, tonemap: &str) -> Result<naga::Module> {
     );
     let tonemap_path = format!("{TONEMAP_DIR}/{tonemap}.wgsl");
     let src = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         asset_text(assets, POST_SHADER)?,
         asset_text(assets, &tonemap_path)
-            .with_context(|| format!("unknown tonemap `{tonemap}`"))?
+            .with_context(|| format!("unknown tonemap `{tonemap}`"))?,
+        asset_text(assets, VIGNETTE_SHADER)?
     );
-    compile_wgsl(&format!("{POST_SHADER} + {tonemap_path}"), &src)
+    compile_wgsl(
+        &format!("{POST_SHADER} + {tonemap_path} + {VIGNETTE_SHADER}"),
+        &src,
+    )
 }
 
 fn asset_text(assets: &Assets, rel: &str) -> Result<String> {
@@ -495,6 +825,20 @@ fn substitute_value(value: &mut Value, props: &[Property]) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// 값 그대로의 RGBA8 (노멀맵: 선형, premultiply 없음).
+fn decode_raw(path: &Path) -> Result<Texture> {
+    let img = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()?
+        .into_rgba8();
+    let (width, height) = img.dimensions();
+    Ok(Texture {
+        width,
+        height,
+        data: img.into_raw(),
+    })
 }
 
 fn decode(path: &Path) -> Result<Texture> {
@@ -586,10 +930,6 @@ mod tests {
             ("[scene]\nwidth = 10\nheight = 0", "positive"),
             ("[scene]\nwidth = 10\nheight = 10\nzoom = 2", "zoom"),
             ("[scene]\nwidth = 10\nheight = 10\n[extra]", "extra"),
-            (
-                "[scene]\nwidth = 10\nheight = 10\n[[light]]\ntype = \"ambient\"",
-                "M6c",
-            ),
         ] {
             let Err(e) = SceneDoc::split(bad.parse().unwrap()) else {
                 panic!("{bad} should be rejected");
@@ -621,7 +961,7 @@ mod tests {
     ) -> ImageLayerDef {
         match layer_def(0, raw, o, common, l).unwrap() {
             LayerDef::Image(d) => d,
-            LayerDef::Particles(..) => panic!("not an image layer"),
+            _ => panic!("not an image layer"),
         }
     }
 
@@ -633,7 +973,7 @@ mod tests {
     ) -> (ParticleLayerDef, bool) {
         match layer_def(0, raw.parse().unwrap(), o, common, l).unwrap() {
             LayerDef::Particles(d, own) => (*d, own),
-            LayerDef::Image(_) => panic!("not a particles layer"),
+            _ => panic!("not a particles layer"),
         }
     }
 
@@ -704,9 +1044,13 @@ mod tests {
         let l = Layers::load_for_test("");
         let o = scene_opts(&l);
         for (bad, why) in [
-            ("type = \"shader\"", "M6c"),
+            ("type = \"shader\"", "source"),
+            (
+                "type = \"shader\"\nsource = \"a.glsl\"\nrect = [0, 0, 0, 10]",
+                "rect",
+            ),
             ("type = \"blob\"", "unknown layer type"),
-            ("type = \"image\"\ntexture = \"a.png\"\nlit = true", "M6c"),
+            ("type = \"image\"\ntexture = \"a.png\"\nlit = 1", "lit"),
             ("type = \"image\"\ntexture = \"a.png\"\nclip = \"x\"", "M6d"),
             ("type = \"image\"\ntexture = \"a.png\"\nzoom = 1", "zoom"),
             ("type = \"image\"", "texture"),
@@ -761,7 +1105,7 @@ mod tests {
     #[test]
     fn builtin_shaders_compile() {
         let assets = Assets::new(std::path::PathBuf::from("/nonexistent"));
-        compile_wgsl(IMAGE_SHADER, &asset_text(&assets, IMAGE_SHADER).unwrap()).unwrap();
+        compile_image(&assets).unwrap();
         for t in ["aces", "agx", "reinhard", "none"] {
             compile_post(&assets, t).unwrap_or_else(|e| panic!("{t}: {e:#}"));
         }

@@ -56,6 +56,8 @@ type    = "color"
 default = "#88aaff"
 ```
 
+`type = "shader"`인 디렉터리형 배경은 `[inputs]`로 텍스처 채널을 넣을 수 있습니다([텍스처 입력](#텍스처-입력-ichannel0ichannel3)).
+
 속성 값은 `config.toml`의 출력별 설정에서 덮어쓸 수 있습니다([config.md](config.md)).
 전달 방식: shader → `u_<이름>` uniform, scene → `"$<이름>"` 참조, web → `window.waywall.properties`.
 
@@ -102,7 +104,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
 - 출력 색은 Shadertoy처럼 **변환 없이** 화면에 씁니다(sRGB가 아닌 swapchain 포맷). Shadertoy에서 보던 색 그대로입니다.
 - 셰이더 안의 줄 번호는 사용자 파일 기준으로 오류에 표시됩니다.
-- 아직 지원하지 않는 것: `iChannel0..3`(텍스처 입력 — M6c에서 추가), 멀티패스, 사운드 셰이더. 쓰면 컴파일 오류가 됩니다.
+- 아직 지원하지 않는 것: 멀티패스(Buffer A–D), 큐브맵·볼륨·키보드·오디오 채널. 쓰면 컴파일 오류가 됩니다. 텍스처 채널은 [아래](#텍스처-입력-ichannel0ichannel3).
 - naga GLSL 프론트엔드가 처리하지 못하는 구문이 있으면 오류가 `waywall list`와 `set`의 응답에 표시됩니다.
   shaderc(glslang) 대체 컴파일러는 로드맵입니다.
 
@@ -141,6 +143,33 @@ fn main_image(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32
 
 `interactive = true`(셰이더 기본값)이면 배경 위에서 마우스를 움직일 때마다 데몬이 이벤트를 받습니다(정지 중에도).
 입력에 반응하지 않는 셰이더는 `interactive = false`로 두면 그 비용도 없습니다.
+
+
+### 텍스처 입력 (`iChannel0`–`iChannel3`)
+
+디렉터리형 셰이더 배경은 `project.toml`의 `[inputs]`로 채널에 이미지를 넣습니다(배경 디렉터리 기준 경로).
+단일 파일 셰이더와 지정하지 않은 채널은 1×1 투명 텍스처이고 해상도는 0입니다.
+
+```toml
+[inputs]
+iChannel0 = "textures/noise.png"
+iChannel1 = { source = "textures/rock.jpg", filter = "nearest", wrap = "clamp" }
+```
+
+| 키 | 설명 |
+|---|---|
+| `source` | 이미지 경로. 값을 문자열 하나로 쓰면 이것만 지정한 것 |
+| `filter` | `linear` · `nearest` |
+| `wrap` | 0–1 밖을 읽을 때: `repeat` · `clamp` · `mirror` |
+
+생략한 `filter`·`wrap`은 `[types.shader.channel]`(사용자 값 > `defaults.toml`)을 쓰며, 사용자가 그 섹션에 적은 값은 배경의 값보다 우선합니다.
+
+- **GLSL:** Shadertoy처럼 `texture(iChannel0, uv)`, `texelFetch`, `textureLod`, `iChannelResolution[n]`(`vec3`, 픽셀 크기)을 씁니다.
+  이미지는 Shadertoy 기본값처럼 **상하를 뒤집어** 올리므로 `uv = (0, 0)`이 이미지의 왼쪽 아래입니다.
+- **WGSL:** `channel0`–`channel3`(`texture_2d<f32>`)과 `channel0_sampler`–`channel3_sampler`,
+  `g.channel_resolution[n]`을 씁니다. `frag_coord`처럼 `uv = (0, 0)`이 이미지의 왼쪽 위입니다.
+- 셰이더 배경의 출력이 변환 없이 화면에 쓰이는 것처럼, 채널 값도 Shadertoy와 같이 **변환 없이** 읽힙니다
+  (sRGB 값 그대로, 알파를 곱하지 않음).
 
 ## 씬 배경
 
@@ -293,12 +322,20 @@ vignette = 0.35
 | `position` | 이미지 중심의 좌표 `[x, y]`. 생략하면 설계 영역 중앙 |
 | `scale` | 숫자 또는 `[x, y]`. 화면 크기 = 텍스처 픽셀 크기 × `scale` (설계 px) |
 | `rotation` | 중심 기준 회전(도, 시계 방향) |
-| `normal_map`, `lit` | 조명 ([조명 타입](#조명-타입)) |
+| `lit` | `true`면 `[[light]]`의 영향을 받음 ([조명](#조명)) |
+| `normal_map` | 노멀맵 이미지 (배경 디렉터리 기준). `lit`일 때 입체감 ([조명](#조명)) |
 
 `scale`·`rotation`의 내장값은 `[types.scene.image]`에 있습니다.
 
-**shader** — `source`(GLSL/WGSL), `rect`(`[x, y, w, h]`, 기본 전체), `inputs`. 셰이더 배경과 같은 uniform 사용.
-`inputs`는 `iChannel0`~`iChannel3`에 넣을 텍스처입니다.
+**shader**
+
+셰이더 배경과 같은 형식(Shadertoy GLSL 또는 WGSL)의 셰이더를 사각형 영역에 그립니다. 같은 uniform(`iTime`, `iPointer`, `u_<속성>` 등)을 씁니다.
+
+| 필드 | 설명 |
+|---|---|
+| `source` | 셰이더 파일 (배경 디렉터리 기준). 필수. 확장자로 언어 판별(`.wgsl`이면 WGSL) |
+| `rect` | 그릴 영역 `[x, y, 폭, 높이]` (설계 px, 왼쪽 위 기준). 생략하면 설계 영역 전체 |
+| `inputs` | 채널 입력 (아래). 셰이더 배경의 `[inputs]`와 같은 형식에 씬 전용 값이 더해짐 |
 
 ```toml
 inputs = { iChannel0 = "below", iChannel1 = "textures/light_mask.png", iChannel2 = "trees" }
@@ -306,12 +343,19 @@ inputs = { iChannel0 = "below", iChannel1 = "textures/light_mask.png", iChannel2
 
 | 값 | 의미 |
 |---|---|
-| `"below"` | 이 레이어 아래에 지금까지 그려진 장면(HDR) |
-| 레이어 `id` | 그 레이어 하나만 그린 결과 |
+| `"below"` | 이 레이어 아래에 지금까지 그려진 장면(HDR, 후처리 전) |
+| 레이어 `id` | 이 레이어보다 **아래**에 있는 그 레이어 하나만 투명 바탕에 그린 결과. `visible = false`인 레이어도 입력으로 쓸 수 있음(화면에는 안 그림) |
 | 경로 | 이미지 파일 (배경 디렉터리 기준) |
 
-GLSL에서는 Shadertoy처럼 `texture(iChannel0, uv)`와 `iChannelResolution[n]`으로, WGSL에서는
-`textureSample(channel0, channel_sampler, uv)`로 읽습니다. 지정하지 않은 채널은 1×1 투명 텍스처입니다.
+- 셰이더는 `rect`를 렌더 해상도로 옮긴 크기의 자기 HDR 텍스처에 그립니다(`iResolution` = 그 크기, `fragCoord`는 `rect` 기준).
+  그 결과를 image 레이어처럼 `blend`·`opacity`·`parallax`로 장면에 합성합니다.
+- 출력은 **선형, premultiplied** RGBA로 해석합니다. 1보다 큰 값은 블룸으로 번집니다. 화면에 그대로 쓰이는 셰이더 배경과 다릅니다.
+- `"below"`와 레이어 입력은 장면에서 **이 레이어의 `rect` 영역만** 잘라 낸 것이라 `uv = fragCoord / iResolution.xy`로 읽으면
+  바로 아래 픽셀입니다. 값은 선형 premultiplied이며 1을 넘을 수 있습니다. 이미지 입력은 image 레이어와 같이 선형화·premultiply한 값입니다.
+- 방향 규칙은 셰이더 배경과 같습니다: GLSL은 모든 채널의 `uv = (0, 0)`이 왼쪽 아래, WGSL은 왼쪽 위.
+- `iPointer`·`iMouse`·`iClick`의 좌표는 `rect` 기준 렌더 px입니다.
+- 생략한 채널 `filter`·`wrap`은 `[types.scene.shader] channel`에서 옵니다.
+- shader 레이어가 있으면 씬은 시간에 따라 변하므로 잠들지 않습니다.
 
 **particles**
 
@@ -375,16 +419,53 @@ fn sprite(uv: vec2<f32>) -> vec4<f32> {
 - 포인터 상호작용과 burst 위치는 레이어의 패럴랙스 이동을 뺀 좌표로 계산해, 화면에서 커서가 있는 곳에 맞습니다.
 - 클릭(burst)과 `pointer`는 `interactive = true`일 때만 동작합니다.
 
-### 조명 타입
+### 조명
+
+`[[light]]`는 `lit = true`인 image 레이어에만 적용됩니다. 파티클·shader 레이어·`lit`이 아닌 이미지는 조명과 관계없이
+자기 색 그대로입니다(파티클은 `emissive`로 스스로 빛나며 블룸으로 번짐). `lit = true`인 레이어가 있는데 `[[light]]`가 없으면 오류입니다.
 
 | 타입 | 필드 |
 |---|---|
-| `ambient` | `color` |
-| `point` | `position`(`[x,y]` 또는 `"pointer"`), `color`, `intensity`, `radius`, `height`, `flicker` |
+| `ambient` | `color`, `intensity` |
+| `point` | `position`(`[x, y]` 또는 `"pointer"`), `color`, `intensity`, `radius`, `height`, `flicker`, `flicker_speed` |
 | `directional` | `direction`(`[x, y, z]`), `color`, `intensity` |
 
-조명은 `lit = true`인 image 레이어(노멀맵이 있으면 입체감 포함)에 적용됩니다. 파티클은 `emissive`로
-스스로 빛나며 블룸으로 번집니다.
+생략한 필드는 `[types.scene.light.<타입>]`(사용자 값 > `defaults.toml`)을 쓰며, 사용자가 그 섹션에 적은 값은 씬의 값보다 우선합니다.
+
+`lit` 레이어의 색(선형, premultiplied)은 다음과 같이 계산합니다. 알파는 바뀌지 않습니다.
+
+```
+색 = 텍스처 색 × ( Σ ambient + Σ point + Σ directional )
+ambient     = color × intensity
+point       = color × intensity × 밝기흔들림 × 감쇠 × max(N·L, 0)
+              L = normalize([x, y, height] − [픽셀 x, 픽셀 y, 0]),  감쇠 = clamp(1 − (d / radius)², 0, 1)²,  d = 평면 거리
+directional = color × intensity × max(N·L, 0),   L = −normalize(direction)
+```
+
+- 좌표는 설계 px이고 x는 오른쪽, y는 **아래**, z는 화면에서 보는 사람 쪽이 +입니다. 그래서 `direction = [1, 1, -1]`은
+  왼쪽 위 앞쪽에서 오른쪽 아래 안쪽으로 비추는 빛입니다. `height`는 점광원이 화면 위로 떠 있는 높이입니다.
+- `N`은 노멀맵(`normal_map`)이 있으면 그 값, 없으면 화면을 똑바로 보는 `[0, 0, 1]`입니다. 노멀맵은 **OpenGL 규약**
+  (R = 오른쪽, G = 위, B = 앞)의 탄젠트 공간이며 레이어 `rotation`만큼 함께 돌아갑니다. 노멀맵은 선형 값으로 읽고, 텍스처와 같은 uv로 대응합니다
+  (크기는 달라도 됨).
+- `position = "pointer"`: 포인터가 배경 위에 있으면 그 위치(설계 px)를 따라가고, 나가면 마지막 위치에 머뭅니다.
+- `flicker`(0–1): 밝기를 `1 + flicker × 노이즈`배로 흔듭니다(노이즈는 −1–1의 매끄러운 값, 초당 약 `flicker_speed`번 바뀜).
+  0보다 크면 씬이 계속 그려집니다.
+- 조명 계산 함수는 `assets/shaders/scene/lighting.wgsl`이며 교체할 수 있습니다([config.md](config.md#assets)).
+
+### 후처리 (`[post]`)
+
+```
+HDR 장면 ─▶ + 블룸 × intensity ─▶ × exposure ─▶ tonemap ─▶ × 비네트 ─▶ 화면(sRGB)
+```
+
+| 키 | 설명 |
+|---|---|
+| `exposure` | 톤매핑 전에 곱하는 밝기 |
+| `tonemap` | `assets/shaders/tonemap/<이름>.wgsl` (`none` · `reinhard` · `aces` · `agx`, 새 파일 = 새 이름) |
+| `bloom` | `{ threshold, intensity, radius }`. 밝기가 `threshold`를 넘는 부분(넘는 만큼)만 번짐. `radius`는 축소 단계 수(클수록 넓게, 한 단계마다 해상도 절반). `intensity = 0`이면 블룸 패스를 만들지 않아 비용 없음 |
+| `vignette` | 0–1. 가장자리를 어둡게 하는 정도. 모양은 `assets/shaders/vignette.wgsl` |
+
+`[post]`의 값은 배경 옵션이라 사용자 `[types.scene.post]`가 이깁니다.
 
 ### 패럴랙스
 
@@ -402,9 +483,8 @@ fn sprite(uv: vec2<f32>) -> vec4<f32> {
 
 ### 구현 상태
 
-M6b까지 `image`·`particles` 레이어, 패럴랙스, `[post]`의 `exposure`·`tonemap`이 동작합니다. 아직 없는 기능을 쓰면
-배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다: `shader` 레이어 · `[[light]]` ·
-`normal_map` · `lit`(M6c), `clip` · `follow` · `effects`(M6d). `[post]`의 `bloom`·`vignette`는 값 검사만 하고 M6c부터 적용됩니다.
+M6c까지 `image`·`particles`·`shader` 레이어, 조명, 패럴랙스, `[post]` 전체가 동작합니다. 아직 없는 기능을 쓰면
+배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다: `clip` · `follow` · `effects`(M6d).
 
 ### 레이어 효과 (`effects`)
 

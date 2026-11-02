@@ -190,12 +190,14 @@ assets/
 ├─ defaults.toml
 ├─ shaders/
 │  ├─ fullscreen.wgsl       # 화면을 덮는 삼각형 버텍스 셰이더 (셰이더 배경, 후처리 패스)
-│  ├─ scene/image.wgsl      # 씬 image 레이어 (사각형 + 텍스처)
-│  ├─ scene/post.wgsl       # HDR → 노출 → tonemap() → 화면. tonemap/<이름>.wgsl을 뒤에 붙여 컴파일
+│  ├─ scene/image.wgsl      # 씬 image 레이어 (사각형 + 텍스처). 뒤에 scene/lighting.wgsl을 붙여 컴파일
+│  ├─ scene/lighting.wgsl   # `lit` 레이어 조명: fn lighting(n, p) -> vec3<f32> (n: 법선, p: 설계 px 위치)
+│  ├─ scene/input.wgsl      # shader 레이어 채널 입력: 장면/레이어에서 rect 영역 잘라 내기(GLSL이면 상하 반전)
+│  ├─ scene/post.wgsl       # HDR + 블룸 → 노출 → tonemap() → vignette() → 화면. tonemap/<이름>.wgsl과 vignette.wgsl을 뒤에 붙여 컴파일
 │  ├─ tonemap/{aces,agx,reinhard,none}.wgsl   # fn tonemap(c: vec3<f32>) -> vec3<f32>. 새 파일 = 새 이름
-│  ├─ bloom/{downsample,upsample}.wgsl
-│  ├─ vignette.wgsl
-│  ├─ lighting.wgsl         # 노멀맵 조명
+│  ├─ bloom/downsample.wgsl # 첫 단계에서 threshold를 넘는 부분만 남기고 해상도 절반씩
+│  ├─ bloom/upsample.wgsl   # 작은 단계부터 키워 가며 더함
+│  ├─ vignette.wgsl         # fn vignette(uv: vec2<f32>, strength: f32) -> f32
 │  ├─ particles/simulate.wgsl   # compute: 방출(고리 버퍼) · 적분 · curl noise · 포인터 힘
 │  ├─ particles/render.wgsl     # 인스턴스 사각형. 뒤에 스프라이트 파일이 붙어 `fn sprite(uv) -> vec4<f32>`를 정의
 │  ├─ effects/sway.wgsl     # 레이어 효과. 새 파일을 두면 새 효과 타입 (M6d)
@@ -233,6 +235,10 @@ render_scale = 1.0
 interactive = true
 background = "#000000"     # 첫 프레임이 그려지기 전에 보이는 색
 
+[types.shader.channel]     # [inputs] 채널에서 생략한 값 (사용자가 적으면 배경의 값보다 우선)
+filter = "linear"          # linear | nearest
+wrap   = "repeat"          # repeat | clamp | mirror
+
 [types.web]
 background = "#000000"     # 페이지가 투명한 부분
 audio = true
@@ -256,6 +262,7 @@ visible = true
 [types.scene.image]        # image 레이어 필드
 scale = 1.0
 rotation = 0.0
+lit = false
 
 [types.scene.post]
 exposure = 1.0
@@ -279,11 +286,25 @@ emissive   = 1.0
 pointer    = { mode = "none", radius = 200.0, strength = 300.0 }
 max_step   = 0.1          # 한 프레임 시뮬레이션의 최대 dt(초)
 
-[types.scene.light.point]
-radius = 300
-height = 100
+[types.scene.shader]       # shader 레이어 필드
+channel = { filter = "linear", wrap = "clamp" }
+
+[types.scene.light.ambient]   # [[light]]에서 생략한 필드 (사용자가 적으면 scene.toml 값보다 우선)
+color     = "#ffffff"
 intensity = 1.0
-flicker = 0.0
+
+[types.scene.light.point]
+color     = "#ffffff"
+intensity = 1.0
+radius    = 300.0
+height    = 100.0
+flicker   = 0.0
+flicker_speed = 8.0
+
+[types.scene.light.directional]
+color     = "#ffffff"
+intensity = 1.0
+direction = [0.0, 0.0, -1.0]
 
 # 아래 두 섹션은 M6d에서 defaults.toml에 추가된다
 [types.scene.effects.sway]  # sway 효과에서 생략한 필드

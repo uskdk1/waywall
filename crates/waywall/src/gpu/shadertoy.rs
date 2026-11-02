@@ -206,6 +206,8 @@ pub struct Inputs {
     pub mouse: [f32; 4],
     pub pointer: [f32; 4],
     pub click: [f32; 4],
+    /// 채널 픽셀 크기 (z = 1, 없는 채널은 0).
+    pub channel_resolution: [[f32; 3]; 4],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +221,7 @@ enum Slot {
     Mouse,
     Pointer,
     Click,
+    ChannelResolution,
     Property(usize),
 }
 
@@ -234,6 +237,7 @@ fn builtin_slot(name: &str) -> Option<Slot> {
         "iMouse" | "mouse" => Slot::Mouse,
         "iPointer" | "pointer" => Slot::Pointer,
         "iClick" | "click" => Slot::Click,
+        "iChannelResolution" | "channel_resolution" => Slot::ChannelResolution,
         _ => return None,
     })
 }
@@ -251,6 +255,9 @@ struct Member {
     offset: u32,
     scalar: Scalar,
     components: u32,
+    /// 배열이면 원소 수와 간격(바이트), 아니면 1과 0.
+    count: u32,
+    stride: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -276,7 +283,15 @@ impl UniformLayout {
         };
         let mut out = Vec::new();
         for m in members {
-            let (scalar, components) = match &module.types[m.ty].inner {
+            let (ty, count, stride) = match &module.types[m.ty].inner {
+                TypeInner::Array {
+                    base,
+                    size: naga::ArraySize::Constant(n),
+                    stride,
+                } => (*base, n.get(), *stride),
+                _ => (m.ty, 1, 0),
+            };
+            let (scalar, components) = match &module.types[ty].inner {
                 TypeInner::Scalar(s) => (s.kind, 1),
                 TypeInner::Vector { size, scalar } => (
                     scalar.kind,
@@ -300,6 +315,8 @@ impl UniformLayout {
                     offset: m.offset,
                     scalar,
                     components,
+                    count,
+                    stride,
                 });
             }
         }
@@ -330,8 +347,15 @@ impl UniformLayout {
             });
             let Some(slot) = slot else { continue };
             let values = slot_values(slot, inputs, props);
-            for (i, v) in values.iter().take(m.components as usize).enumerate() {
-                let at = m.offset as usize + i * 4;
+            // 값은 원소마다 slot_components개씩 이어져 있다.
+            let per = values.len() / m.count.max(1) as usize;
+            let elems =
+                (0..m.count as usize).flat_map(|k| (0..m.components as usize).map(move |i| (k, i)));
+            for (k, i) in elems {
+                let Some(v) = values.get(k * per + i) else {
+                    continue;
+                };
+                let at = m.offset as usize + k * m.stride as usize + i * 4;
                 let bytes = match m.scalar {
                     Scalar::Float => v.to_f32().to_ne_bytes(),
                     Scalar::Int => v.to_i32().to_ne_bytes(),
@@ -379,6 +403,7 @@ fn slot_values(slot: Slot, x: &Inputs, props: &[Property]) -> Vec<Num> {
         Slot::Mouse => f(&x.mouse),
         Slot::Pointer => f(&x.pointer),
         Slot::Click => f(&x.click),
+        Slot::ChannelResolution => f(x.channel_resolution.as_flattened()),
         Slot::Property(i) => match props[i].value {
             PropValue::Float(v) => vec![Num::F(v)],
             PropValue::Int(v) => vec![Num::I(v)],
@@ -407,8 +432,31 @@ mod tests {
     #[test]
     fn examples_compile() {
         let mut n = 0;
+        let layers = crate::config::Layers::load_for_test("");
+        let detect = layers.global().unwrap().detect;
         for entry in std::fs::read_dir(examples()).unwrap() {
             let path = entry.unwrap().path();
+            let wp = crate::wallpaper::resolve(
+                path.to_str().unwrap(),
+                &detect,
+                std::path::Path::new("/"),
+            )
+            .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+            let crate::wallpaper::Source::File(path) = wp.source else {
+                panic!("{}", path.display());
+            };
+            // 디렉터리형이면 채널 이미지까지 읽혀야 한다.
+            let opts: waywall_proto::config::ShaderOptions = layers
+                .type_options(wp.kind, wp.options.as_ref(), &layers.output("X").unwrap())
+                .unwrap();
+            let channels =
+                crate::backend::shader::parse_inputs(wp.inputs.as_ref(), &opts.channel, None)
+                    .unwrap();
+            for c in channels.iter().flatten() {
+                let file = path.parent().unwrap().join(&c.source);
+                crate::backend::shader::decode_channel(&file, Language::from_path(&path))
+                    .unwrap_or_else(|e| panic!("{}: {e:#}", file.display()));
+            }
             let src = std::fs::read_to_string(&path).unwrap();
             let c = compile(&assets(), Language::from_path(&path), &src, &[], "x")
                 .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
@@ -433,17 +481,18 @@ mod tests {
         for (lang, src) in [
             (
                 Language::Glsl,
-                "void mainImage(out vec4 c, in vec2 p) { c = u_tint * u_density + iMouse + vec4(iResolution, iTime); }",
+                "void mainImage(out vec4 c, in vec2 p) { c = u_tint * u_density + iMouse + vec4(iResolution, iTime) + vec4(iChannelResolution[1], 0.0); }",
             ),
             (
                 Language::Wgsl,
-                "@fragment fn main_image(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> { return g.u_tint * g.u_density + g.mouse + vec4<f32>(g.resolution, g.time); }",
+                "@fragment fn main_image(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> { return g.u_tint * g.u_density + g.mouse + vec4<f32>(g.resolution, g.time) + vec4<f32>(g.channel_resolution[1], 0.0); }",
             ),
         ] {
             let c = compile(&assets(), lang, src, &props, "t").unwrap();
             let inputs = Inputs {
                 resolution: [1920.0, 1080.0, 1.0],
                 time: 3.0,
+                channel_resolution: [[0.0; 3], [640.0, 360.0, 1.0], [0.0; 3], [7.0, 8.0, 1.0]],
                 ..Default::default()
             };
             let buf = c.layout.write(&inputs, &props);
@@ -469,6 +518,15 @@ mod tests {
             assert_eq!(f(at(res)), 1920.0, "{lang:?}");
             assert_eq!(f(at(res) + 4), 1080.0);
             assert_eq!(f(at(time)), 3.0);
+            let ch = if lang == Language::Glsl {
+                "iChannelResolution"
+            } else {
+                "channel_resolution"
+            };
+            // vec3 배열의 원소 간격은 16바이트.
+            assert_eq!(f(at(ch) + 16), 640.0, "{lang:?}");
+            assert_eq!(f(at(ch) + 20), 360.0);
+            assert_eq!(f(at(ch) + 48), 7.0);
             assert_eq!(f(at("u_density")), 2.5);
             assert_eq!(f(at("u_tint")), 1.0);
             assert!((f(at("u_tint") + 12) - 128.0 / 255.0).abs() < 1e-6);

@@ -7,7 +7,7 @@ use anyhow::{Result, ensure};
 use waywall_proto::config::{EmitterShape, PointerMode};
 
 use super::ParticleLayer;
-use super::render::{FitMap, blend_state, f32_bytes, upload_texture};
+use super::render::{FitMap, TEXTURE_FORMAT, blend_state, f32_bytes, upload_texture};
 use crate::backend::view::FrameInfo;
 use crate::gpu::Gpu;
 
@@ -76,7 +76,7 @@ impl GpuParticles {
         });
         let textured = spec.texture.is_some();
         let texture = match spec.texture.take() {
-            Some(t) => upload_texture(gpu, d, id, &t),
+            Some(t) => upload_texture(gpu, d, id, &t, TEXTURE_FORMAT),
             None => upload_texture(
                 gpu,
                 d,
@@ -86,6 +86,7 @@ impl GpuParticles {
                     height: 1,
                     data: PLACEHOLDER_TEXEL.to_vec(),
                 },
+                TEXTURE_FORMAT,
             ),
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

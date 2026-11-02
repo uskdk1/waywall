@@ -41,7 +41,8 @@ use waywall_proto::project::WallpaperKind;
 use crate::assets::Assets;
 use crate::backend::image::{self, Decoded};
 use crate::backend::scene;
-use crate::backend::shader::ShaderSpec;
+use crate::backend::scene::Texture;
+use crate::backend::shader::{self, ShaderSpec};
 use crate::backend::video::{
     self, Mode as VideoMode, VideoEvent, VideoMsg, VideoParams, VideoView,
 };
@@ -545,16 +546,33 @@ impl State {
                 let props = properties::resolve(wp.properties.as_ref(), &cfg.properties)?;
                 let source = std::fs::read_to_string(path)
                     .with_context(|| format!("failed to read {}", path.display()))?;
-                let compiled = shadertoy::compile(
-                    &self.assets(),
-                    Language::from_path(path),
-                    &source,
-                    &props,
-                    &wp.name,
-                )?;
+                let lang = Language::from_path(path);
+                let compiled = shadertoy::compile(&self.assets(), lang, &source, &props, &wp.name)?;
+                let user = self
+                    .layers
+                    .user_type_section(wp.kind, shader::CHANNEL_SECTION);
+                let defs = shader::parse_inputs(wp.inputs.as_ref(), &opts.channel, user)?;
+                let base = path.parent().unwrap_or(std::path::Path::new("."));
+                let mut channels: [Option<Texture>; shader::CHANNELS] = Default::default();
+                let mut sampling = [opts.channel; shader::CHANNELS];
+                for (i, def) in defs.into_iter().enumerate() {
+                    if let Some(def) = def {
+                        let file = base.join(&def.source);
+                        channels[i] =
+                            Some(shader::decode_channel(&file, lang).with_context(|| {
+                                format!("inputs.{}: {}", shader::CHANNEL_NAMES[i], file.display())
+                            })?);
+                        sampling[i] = def.sampling;
+                    }
+                }
                 Ok(Prepared::Gpu {
                     spec: Box::new(GpuSpec {
-                        renderer: RendererSpec::Shader(Box::new(ShaderSpec { compiled, props })),
+                        renderer: RendererSpec::Shader(Box::new(ShaderSpec {
+                            compiled,
+                            props,
+                            channels,
+                            sampling,
+                        })),
                         opts: ViewOpts {
                             fps: opts.fps,
                             render_scale: opts.render_scale,
