@@ -128,7 +128,9 @@ pub struct ShaderLayer {
     pub lang: Language,
     pub inputs: [Option<ChannelInput>; CHANNELS],
     pub sampling: [ChannelDefaults; CHANNELS],
-    /// HDR 버퍼에 직접 그린다: `opacity = 1`이고 다른 레이어의 입력이 아님 (docs/architecture.md#씬-렌더러).
+    /// 그리는 해상도 배율.
+    pub render_scale: f64,
+    /// HDR 버퍼에 직접 그린다: `opacity = 1`, `render_scale = 1`이고 다른 레이어의 입력이 아님 (docs/architecture.md#씬-렌더러).
     pub direct: bool,
 }
 

@@ -94,6 +94,7 @@ struct ShaderLayerDef {
     inputs: Option<Table>,
     /// 채널에서 생략한 filter·wrap.
     channel: ChannelDefaults,
+    render_scale: f64,
 }
 
 /// particles 레이어 (병합 후).
@@ -369,7 +370,8 @@ pub fn load(
                     lang,
                     inputs,
                     sampling,
-                    direct: d.opacity == 1.0 && !referenced.contains(&old),
+                    render_scale: d.render_scale,
+                    direct: d.opacity == 1.0 && d.render_scale == 1.0 && !referenced.contains(&old),
                 }))
             }
         });
@@ -601,6 +603,11 @@ fn layer_def(
                     ctx()
                 );
             }
+            ensure!(
+                d.render_scale > 0.0 && d.render_scale.is_finite(),
+                "{}: `render_scale` must be positive",
+                ctx()
+            );
             return Ok(LayerDef::Shader(Box::new(d)));
         }
         _ => {}
@@ -1049,6 +1056,10 @@ mod tests {
             (
                 "type = \"shader\"\nsource = \"a.glsl\"\nrect = [0, 0, 0, 10]",
                 "rect",
+            ),
+            (
+                "type = \"shader\"\nsource = \"a.glsl\"\nrender_scale = 0",
+                "render_scale",
             ),
             ("type = \"blob\"", "unknown layer type"),
             ("type = \"image\"\ntexture = \"a.png\"\nlit = 1", "lit"),

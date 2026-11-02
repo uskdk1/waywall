@@ -20,8 +20,8 @@ use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
 pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// `scene/input.wgsl` 엔트리 (인터페이스).
 const FS_ENTRY: &str = "fs_main";
-/// input.wgsl `Crop`: origin(i32 2개), flip, height (32비트 단어 4개).
-const CROP_WORDS: usize = 4;
+/// input.wgsl `Crop`: origin(i32 2개), flip, height, step, 패딩 (32비트 단어 8개).
+const CROP_WORDS: usize = 8;
 
 /// 렌더 타깃으로도, 채널로도 쓰는 텍스처.
 pub struct Target {
@@ -154,12 +154,17 @@ impl Cropper {
         bind_group: &wgpu::BindGroup,
         origin: [i32; 2],
         flip: bool,
+        step: f32,
     ) {
         let words: [u32; CROP_WORDS] = [
             origin[0] as u32,
             origin[1] as u32,
             u32::from(flip),
             dst.texture.height(),
+            step.to_bits(),
+            0,
+            0,
+            0,
         ];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         gpu.queue.write_buffer(uniforms, 0, &bytes);
@@ -212,6 +217,7 @@ pub struct GpuShaderLayer {
     id: String,
     rect: [f64; 4],
     lang: Language,
+    render_scale: f64,
     /// HDR 버퍼에 직접 그리는지 (docs/architecture.md#씬-렌더러).
     direct: bool,
     renderer: ShaderRenderer,
@@ -249,6 +255,7 @@ impl GpuShaderLayer {
             lang,
             inputs,
             sampling,
+            render_scale,
             direct,
         } = *spec;
         let (format, blend_state) = if direct {
@@ -304,6 +311,7 @@ impl GpuShaderLayer {
             id,
             rect,
             lang,
+            render_scale,
             direct,
             renderer,
             inputs,
@@ -351,8 +359,8 @@ impl GpuShaderLayer {
     pub fn resize(&mut self, gpu: &Gpu, map: FitMap, b: &LayerBindings<'_>, src: &Sources<'_>) {
         let d = &gpu.device;
         self.size = (
-            ((self.rect[2] * map.scale[0]).round() as u32).max(1),
-            ((self.rect[3] * map.scale[1]).round() as u32).max(1),
+            ((self.rect[2] * map.scale[0] * self.render_scale).round() as u32).max(1),
+            ((self.rect[3] * map.scale[1] * self.render_scale).round() as u32).max(1),
         );
         for input in self.inputs.iter_mut().flatten() {
             let Input::Crop {
@@ -418,7 +426,8 @@ impl GpuShaderLayer {
                     bound: Some((target, group)),
                     ..
                 }) => {
-                    cropper.run(gpu, encoder, target, uniforms, group, origin, flip);
+                    let step = (1.0 / self.render_scale) as f32;
+                    cropper.run(gpu, encoder, target, uniforms, group, origin, flip, step);
                     resolution[i] = [self.size.0 as f32, self.size.1 as f32, 1.0];
                 }
                 Some(Input::Image { size, .. }) => {
@@ -427,9 +436,11 @@ impl GpuShaderLayer {
                 _ => {}
             }
         }
-        // rect의 왼쪽 아래 (렌더 px, 왼쪽 아래 원점).
-        let bottom = f.size.1 as f32 - (origin[1] as f32 + self.size.1 as f32);
-        let mut inputs = frame_inputs(f, self.size, [origin[0] as f32, bottom], resolution);
+        // rect의 왼쪽 아래 (렌더 px, 왼쪽 아래 원점). 화면에서 rect의 높이는 그리는 크기 / render_scale.
+        let screen_h = (self.size.1 as f64 / self.render_scale) as f32;
+        let bottom = f.size.1 as f32 - (origin[1] as f32 + screen_h);
+        let scale = self.render_scale as f32;
+        let mut inputs = frame_inputs(f, self.size, [origin[0] as f32, bottom], scale, resolution);
         let draw = if self.direct {
             let Some(scissor) = clip_rect(origin, self.size, f.size, map.scissor()) else {
                 return;

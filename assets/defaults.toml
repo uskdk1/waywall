@@ -120,6 +120,7 @@ max_step   = 0.1             # 한 프레임 시뮬레이션의 최대 dt(초)
 
 [types.scene.shader]
 channel = { filter = "linear", wrap = "clamp" }   # inputs 채널에서 생략한 값
+render_scale = 1.0           # 이 레이어를 그리는 해상도 배율 (rect의 렌더 크기 × 이 값)
 
 [types.scene.light.ambient]  # [[light]]에서 생략한 필드
 color     = "#ffffff"

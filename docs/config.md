@@ -288,6 +288,7 @@ max_step   = 0.1          # 한 프레임 시뮬레이션의 최대 dt(초)
 
 [types.scene.shader]       # shader 레이어 필드
 channel = { filter = "linear", wrap = "clamp" }
+render_scale = 1.0
 
 [types.scene.light.ambient]   # [[light]]에서 생략한 필드 (사용자가 적으면 scene.toml 값보다 우선)
 color     = "#ffffff"

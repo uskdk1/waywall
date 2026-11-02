@@ -19,6 +19,7 @@ id     = "rays"
 source = "sunlight.glsl"
 inputs = { iChannel0 = "below" }
 blend  = "add"
+render_scale = 0.5               # 빛줄기는 부드러워서 절반 해상도로 충분 (비용 약 1/4)
 
 [post]
 tonemap = "agx"

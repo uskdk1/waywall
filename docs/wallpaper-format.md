@@ -338,6 +338,7 @@ vignette = 0.35
 | `source` | 셰이더 파일 (배경 디렉터리 기준). 필수. 확장자로 언어 판별(`.wgsl`이면 WGSL) |
 | `rect` | 그릴 영역 `[x, y, 폭, 높이]` (설계 px, 왼쪽 위 기준). 생략하면 설계 영역 전체 |
 | `inputs` | 채널 입력 (아래). 셰이더 배경의 `[inputs]`와 같은 형식에 씬 전용 값이 더해짐 |
+| `render_scale` | 이 레이어를 그리는 해상도 배율 (0보다 큼). 무거운 효과를 `0.5`로 그리면 비용이 약 1/4. 그린 결과를 `rect` 크기로 늘려 합성 |
 
 ```toml
 inputs = { iChannel0 = "below", iChannel1 = "textures/light_mask.png", iChannel2 = "trees" }
@@ -357,6 +358,8 @@ inputs = { iChannel0 = "below", iChannel1 = "textures/light_mask.png", iChannel2
   바로 아래 픽셀입니다. 값은 선형 premultiplied이며 1을 넘을 수 있습니다. 이미지 입력은 image 레이어와 같이 선형화·premultiply한 값입니다.
 - 방향 규칙은 셰이더 배경과 같습니다: GLSL은 모든 채널의 `uv = (0, 0)`이 왼쪽 아래, WGSL은 왼쪽 위.
 - `iPointer`·`iMouse`·`iClick`의 좌표는 `rect` 기준 렌더 px입니다.
+- `render_scale`이 1이 아니면 `iResolution`·`fragCoord`·포인터 좌표와 `"below"`·레이어 입력이 모두 그 해상도 기준입니다
+  (`rect`의 렌더 크기 × `render_scale`). 입력은 그 해상도로 줄여서(가장 가까운 픽셀) 넘깁니다.
 - 생략한 채널 `filter`·`wrap`은 `[types.scene.shader] channel`에서 옵니다.
 - shader 레이어가 있으면 씬은 시간에 따라 변하므로 잠들지 않습니다.
 

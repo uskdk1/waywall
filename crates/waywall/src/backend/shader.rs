@@ -287,19 +287,27 @@ impl ShaderRenderer {
     }
 }
 
-/// 프레임 값 → uniform 입력. `size`: 셰이더가 그리는 크기(px), `origin`: 그 영역의 왼쪽 아래(렌더 px, 왼쪽 아래 원점).
+/// 프레임 값 → uniform 입력. `size`: 셰이더가 그리는 크기(px), `origin`: 그 영역의 왼쪽 아래(렌더 px, 왼쪽 아래 원점),
+/// `scale`: 그리는 해상도 / 렌더 해상도 (포인터 좌표를 그리는 해상도로 옮김).
 pub fn frame_inputs(
     f: &FrameInfo<'_>,
     size: (u32, u32),
     origin: [f32; 2],
+    scale: f32,
     channel_resolution: [[f32; 3]; CHANNELS],
 ) -> Inputs {
     let date = Local::now();
     let midnight = f64::from(date.num_seconds_from_midnight()) + f64::from(date.nanosecond()) / 1e9;
     let p = f.pointer;
-    let local = |x: f32, y: f32| [x - origin[0], y - origin[1]];
+    let local = |x: f32, y: f32| [(x - origin[0]) * scale, (y - origin[1]) * scale];
     // iMouse의 z, w는 부호가 상태를 나타내므로 크기만 옮긴다.
-    let shift = |v: f32, o: f32| if v < 0.0 { -(v.abs() - o) } else { v - o };
+    let shift = |v: f32, o: f32| {
+        if v < 0.0 {
+            -(v.abs() - o) * scale
+        } else {
+            (v - o) * scale
+        }
+    };
     let [px, py] = local(p.pos[0], p.pos[1]);
     let [cx, cy] = local(p.click[0], p.click[1]);
     let [mx, my] = local(p.mouse[0], p.mouse[1]);
@@ -431,7 +439,7 @@ impl ShaderBackground {
         f: &FrameInfo<'_>,
         name: &str,
     ) {
-        let inputs = frame_inputs(f, f.size, [0.0, 0.0], self.channel_resolution);
+        let inputs = frame_inputs(f, f.size, [0.0, 0.0], 1.0, self.channel_resolution);
         let draw = Draw {
             target,
             // 삼각형이 전부 덮으므로 이전 내용은 필요 없다.

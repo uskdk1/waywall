@@ -282,6 +282,7 @@ pub struct SceneImageDefaults {
 #[serde(deny_unknown_fields)]
 pub struct SceneShaderDefaults {
     pub channel: ChannelDefaults,
+    pub render_scale: f64,
 }
 
 /// 숫자 하나(가로세로 같음) 또는 `[x, y]`.
