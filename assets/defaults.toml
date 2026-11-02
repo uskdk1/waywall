@@ -29,6 +29,10 @@ slow_frame_count = 3
 foreign_toplevel = true
 niri             = false
 
+[web_helper]
+restart_limit    = 3         # 헬퍼가 restart_window_s 안에 이만큼 비정상 종료하면 다시 띄우지 않음
+restart_window_s = 60
+
 [cursor]
 shape = "default"            # wp_cursor_shape_v1 이름 또는 hidden
 theme = ""                   # 빈 값 = XCURSOR_THEME

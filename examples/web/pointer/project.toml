@@ -1,0 +1,13 @@
+[wallpaper]
+name  = "Pointer Trails"
+type  = "web"
+entry = "index.html"
+
+[options]
+interactive = true
+
+[properties.hue]
+type    = "float"
+default = 200.0
+min     = 0.0
+max     = 360.0

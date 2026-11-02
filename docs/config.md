@@ -136,6 +136,13 @@ density = 2.0
 
 톤매핑은 씬 옵션 `[types.scene.post] tonemap`입니다(작성자가 씬마다 고르고, 사용자가 적으면 모든 씬에 적용).
 
+### `[web_helper]`
+
+| 키 | 타입 | 내장값 | 설명 |
+|---|---|---|---|
+| `restart_limit` | int | `3` | 웹 헬퍼가 `restart_window_s`초 안에 이만큼 비정상 종료하면 더 띄우지 않고 웹 출력을 `error`로 둠(`reload`나 새 `set`으로 다시 시도) |
+| `restart_window_s` | int | `60` | 위 횟수를 세는 기간(초) |
+
 ### `[visibility]`
 
 | 키 | 타입 | 내장값 | 설명 |

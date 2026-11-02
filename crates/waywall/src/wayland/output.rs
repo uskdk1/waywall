@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use smithay_client_toolkit::compositor::{CompositorState, Region};
 use smithay_client_toolkit::shell::WaylandSurface;
-use smithay_client_toolkit::shell::wlr_layer::LayerSurface;
+use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, LayerSurface};
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::subcompositor::SubcompositorState;
@@ -37,6 +37,14 @@ use crate::visibility::frame::FrameWatch;
 
 /// wp_fractional_scale_v1의 분모.
 pub const SCALE_DENOMINATOR: u32 = 120;
+
+/// 화면 전체를 덮는 배경 layer surface의 설정. 만들 때와, 언맵 뒤 다시 매핑할 때 보낸다.
+pub fn configure_layer(layer: &LayerSurface) {
+    layer.set_anchor(Anchor::all());
+    layer.set_exclusive_zone(-1);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    layer.set_size(0, 0);
+}
 
 /// 렌더링에 필요한 공유 객체.
 pub struct Ctx<'a> {
@@ -66,6 +74,24 @@ pub enum Content {
     Image(ShownImage),
     Gpu(Box<GpuView>),
     Video(Box<VideoView>),
+    /// 웹 헬퍼가 띄운 페이지. 데몬 surface는 언맵되어 있다.
+    Web,
+}
+
+/// 웹 헬퍼에 보낸 페이지 (docs/architecture.md#웹-헬퍼).
+pub struct WebPage {
+    pub generation: u64,
+    pub purpose: Purpose,
+    /// 헬퍼를 다시 띄울 때 그대로 다시 보낸다.
+    pub show: waywall_proto::web::Show,
+    /// 페이지 로드가 끝났다 (`shown`).
+    pub shown: bool,
+    /// 헬퍼가 frame 기아로 가려졌다고 보고했다.
+    pub hidden: bool,
+    /// 마지막으로 헬퍼에 보낸 일시정지 상태.
+    pub paused_sent: bool,
+    /// `[types.web] audio`: false면 볼륨과 관계없이 음소거.
+    pub audio: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +146,12 @@ pub struct Output {
     pub covered_niri: bool,
     /// 마지막으로 내용에 적용한 일시정지 상태.
     pub paused_applied: bool,
+    /// 웹 배경 (보낸 뒤 `shown` 전 포함).
+    pub web: Option<WebPage>,
+    /// 웹 배경 동안 데몬 surface에 버퍼가 없다. 다시 그리려면 초기 커밋 → configure가 필요하다.
+    pub unmapped: bool,
+    /// 다시 매핑하려고 초기 커밋을 보냈고 configure를 기다린다.
+    pub remap_pending: bool,
     solid: Option<SolidBuffer>,
     plane: Option<Plane>,
 }
@@ -171,6 +203,9 @@ impl Output {
             covered_toplevel: false,
             covered_niri: false,
             paused_applied: false,
+            web: None,
+            unmapped: false,
+            remap_pending: false,
             solid: None,
             plane: None,
         }
@@ -199,6 +234,7 @@ impl Output {
             Content::Image(_) => Some(RenderPath::Shm),
             Content::Gpu(_) => Some(RenderPath::Gpu),
             Content::Video(v) => Some(v.mode.render_path()),
+            Content::Web => Some(RenderPath::Web),
         }
     }
 
@@ -210,7 +246,11 @@ impl Output {
 
     /// 사유가 하나라도 있으면 멈춤 (docs/architecture.md#일시정지-사유).
     pub fn is_paused(&self) -> bool {
-        self.user_paused || self.watch.hidden() || self.covered_toplevel || self.covered_niri
+        self.user_paused
+            || self.watch.hidden()
+            || self.covered_toplevel
+            || self.covered_niri
+            || self.web.as_ref().is_some_and(|w| w.hidden)
     }
 
     /// 계속 갱신되는 내용(셰이더, 영상)의 서브서피스. frame 콜백 감시 대상.
@@ -232,7 +272,36 @@ impl Output {
         self.generation
     }
 
+    /// 웹 페이지가 떴다: 이전 내용을 버리고 데몬 surface를 언맵한다(같은 layer에서 겹치지 않게).
+    pub fn show_web(&mut self) {
+        self.content = Content::Web;
+        self.incoming = None;
+        self.plane = None;
+        self.solid = None;
+        if !self.unmapped {
+            self.surface().attach(None, 0, 0);
+            self.surface().commit();
+            self.unmapped = true;
+        }
+        self.content_changed();
+    }
+
+    /// 웹에서 다른 배경으로: 초기 커밋을 보내 configure를 받은 뒤 다시 그린다.
+    pub fn request_remap(&mut self) {
+        self.content = Content::Nothing;
+        if self.unmapped && !self.remap_pending {
+            // 언맵하면 layer surface 상태가 만든 직후로 돌아가므로(wlr-layer-shell) 설정을 다시 보낸다.
+            configure_layer(&self.layer);
+            self.layer.commit();
+            self.remap_pending = true;
+        }
+    }
+
     pub fn present_color(&mut self, ctx: &Ctx<'_>, color: Color) -> Result<()> {
+        if self.unmapped {
+            // 웹 페이지가 덮고 있는 동안의 로딩 화면 등: 언맵된 layer surface에는 configure 전에 버퍼를 붙일 수 없다.
+            return Ok(());
+        }
         let old_solid = self.set_solid(ctx, color)?;
         let old_plane = self.plane.take();
         set_input(ctx, self.surface(), false)?;

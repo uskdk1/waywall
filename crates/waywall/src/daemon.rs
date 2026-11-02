@@ -21,7 +21,7 @@ use smithay_client_toolkit::registry::RegistryState;
 use smithay_client_toolkit::seat::SeatState;
 use smithay_client_toolkit::seat::pointer::{PointerEventKind, ThemedPointer};
 use smithay_client_toolkit::shell::WaylandSurface;
-use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell};
+use smithay_client_toolkit::shell::wlr_layer::{Layer, LayerShell};
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::subcompositor::SubcompositorState;
 use toml::Table;
@@ -31,12 +31,14 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, QueueHandle};
 use waywall_proto::config::{
     Config, Fill, FillOrPrevious, ImageOptions, LayerKind, PauseWhen, ShaderOptions, VideoOptions,
+    WebOptions,
 };
 use waywall_proto::ipc::{
     ListData, OutputStatus, PauseReason, PlayState, Reason, ReasonSource, Request, Response,
     WallpaperInfo,
 };
 use waywall_proto::project::WallpaperKind;
+use waywall_proto::web::{Command as WebCommand, Event as WebEvent, Show};
 
 use crate::assets::Assets;
 use crate::backend::image::{self, Decoded};
@@ -62,8 +64,10 @@ use crate::wallpaper::{self, Source, Wallpaper};
 use crate::wayland::dmabuf::DrmFormat;
 use crate::wayland::globals::Globals;
 use crate::wayland::output::{
-    Content, Ctx, DesyncPlane, Output, Pending, Purpose, SCALE_DENOMINATOR,
+    Content, Ctx, DesyncPlane, Output, Pending, Purpose, SCALE_DENOMINATOR, WebPage,
+    configure_layer,
 };
+use crate::web::{WebHelper, WebMsg};
 use smithay_client_toolkit::compositor::FrameCallbackData;
 use smithay_client_toolkit::dmabuf::DmabufState;
 use wayland_client::protocol::wl_buffer::WlBuffer;
@@ -114,6 +118,14 @@ pub struct State {
     /// niri IPC: 출력 → 활성 워크스페이스에 창이 있는지.
     niri: HashMap<String, bool>,
     niri_active: bool,
+
+    /// 웹 배경이 있을 때만 존재한다.
+    web: Option<WebHelper>,
+    webs: Sender<WebMsg>,
+    /// 헬퍼가 비정상 종료한 시각 (최근 것만). 짧은 시간에 너무 자주 죽으면 포기한다.
+    web_crashes: Vec<Instant>,
+    /// 포기했다. `reload`나 새 `set`까지 웹 배경을 띄우지 않는다.
+    web_broken: bool,
 }
 
 /// 디코딩 스레드 → 메인 루프.
@@ -156,6 +168,12 @@ enum Prepared {
         path: PathBuf,
         params: VideoParams,
     },
+    Web {
+        wallpaper: Wallpaper,
+        url: String,
+        properties: serde_json::Map<String, serde_json::Value>,
+        opts: WebOptions,
+    },
 }
 
 impl Prepared {
@@ -163,7 +181,8 @@ impl Prepared {
         match self {
             Prepared::Image { wallpaper, .. }
             | Prepared::Gpu { wallpaper, .. }
-            | Prepared::Video { wallpaper, .. } => wallpaper,
+            | Prepared::Video { wallpaper, .. }
+            | Prepared::Web { wallpaper, .. } => wallpaper,
         }
     }
 }
@@ -190,6 +209,15 @@ pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
             }
         })
         .map_err(|e| anyhow!("failed to insert video channel: {e}"))?;
+
+    let (webs, web_rx): (Sender<WebMsg>, Channel<WebMsg>) = channel();
+    handle
+        .insert_source(web_rx, |ev, _, state| {
+            if let ChannelEvent::Msg(msg) = ev {
+                state.on_web(msg);
+            }
+        })
+        .map_err(|e| anyhow!("failed to insert web helper channel: {e}"))?;
 
     let (images, image_rx): (Sender<ImageDone>, Channel<ImageDone>) = channel();
     handle
@@ -259,6 +287,10 @@ pub fn run(config_arg: Option<PathBuf>, layers: Layers) -> Result<()> {
         toplevels,
         niri: HashMap::new(),
         niri_active,
+        web: None,
+        webs,
+        web_crashes: Vec::new(),
+        web_broken: false,
     };
 
     tracing::info!(config = ?state.layers.config_path(), "waywall daemon started");
@@ -383,10 +415,7 @@ impl State {
             Some(self.config.surface.namespace.clone()),
             Some(&wl_output),
         );
-        layer.set_anchor(Anchor::all());
-        layer.set_exclusive_zone(-1);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer.set_size(0, 0);
+        configure_layer(&layer);
         layer.commit();
 
         let id = self.next_output_id;
@@ -410,12 +439,30 @@ impl State {
 
     pub fn drop_output(&mut self, idx: usize) {
         let name = self.outputs[idx].name.clone();
+        if self.outputs[idx].web.is_some() {
+            self.send_web(WebCommand::Hide {
+                output: name.clone(),
+            });
+        }
         self.settle(idx, Err(format!("{name}: output removed")));
         self.outputs.remove(idx);
     }
 
     pub fn configured(&mut self, idx: usize, size: (u32, u32)) {
         let out = &mut self.outputs[idx];
+        if out.remap_pending {
+            // 웹에서 돌아왔다: 다시 매핑됐으니 지금 설정대로 그린다.
+            out.remap_pending = false;
+            out.unmapped = false;
+            out.logical = Some(size);
+            out.pending = None;
+            tracing::debug!(output = %out.name, ?size, "remapped");
+            self.show_configured(idx);
+            if !self.outputs[idx].loading_main() {
+                self.settle(idx, Ok(()));
+            }
+            return;
+        }
         let first = out.logical.is_none();
         if out.logical == Some(size) {
             return;
@@ -447,6 +494,10 @@ impl State {
 
     /// 크기/스케일 변경: 배치를 즉시 갱신하고, 미리 줄인 이미지가 이제 부족하면 다시 읽는다.
     fn geometry_changed(&mut self, idx: usize) {
+        if self.outputs[idx].unmapped {
+            // 웹 페이지가 덮고 있다. 헬퍼 창은 GTK가 맞춘다.
+            return;
+        }
         self.outputs[idx].relayout();
         if matches!(self.outputs[idx].content, Content::Gpu(_)) {
             self.gpu_resized(idx);
@@ -480,6 +531,9 @@ impl State {
 
     /// 설정에 따라 출력에 보일 내용을 정한다.
     fn show_configured(&mut self, idx: usize) {
+        if self.leave_web(idx) {
+            return;
+        }
         self.outputs[idx].error = None;
         match self.outputs[idx].cfg.wallpaper.clone() {
             Some(spec) => self.load(idx, &spec, Purpose::Main),
@@ -610,6 +664,22 @@ impl State {
                     wallpaper: wp,
                 })
             }
+            (WallpaperKind::Web, source) => {
+                let opts: WebOptions =
+                    self.layers
+                        .type_options(wp.kind, wp.options.as_ref(), cfg)?;
+                let props = properties::resolve(wp.properties.as_ref(), &cfg.properties)?;
+                let url = match source {
+                    Source::Url(u) => u.clone(),
+                    Source::File(path) => crate::web::file_url(&std::fs::canonicalize(path)?),
+                };
+                Ok(Prepared::Web {
+                    url,
+                    properties: crate::web::properties_json(&props),
+                    opts,
+                    wallpaper: wp,
+                })
+            }
             (kind, _) => Err(anyhow!("{} wallpapers are not implemented yet", kind.key())),
         }
     }
@@ -638,6 +708,12 @@ impl State {
                 path,
                 params,
             } => return self.show_video(idx, &path, wallpaper.name, params, purpose),
+            Prepared::Web {
+                url,
+                properties,
+                opts,
+                ..
+            } => return self.show_web(idx, url, properties, &opts, purpose),
         };
         let out = &self.outputs[idx];
         let request = image::Request {
@@ -829,6 +905,9 @@ impl State {
         path: String,
         save: bool,
     ) -> Result<()> {
+        // 사용자가 다시 지정하면 헬퍼를 다시 시도한다.
+        self.web_broken = false;
+        self.web_crashes.clear();
         let targets = self.targets(output)?;
         // 하나라도 안 되면 아무것도 바꾸지 않는다.
         for &idx in &targets {
@@ -907,6 +986,225 @@ impl State {
             self.apply_pause(idx);
         }
         Ok(Response::ok())
+    }
+
+    // ── 웹 ───────────────────────────────────────────────────────────────
+
+    /// 헬퍼에 페이지를 보낸다. 페이지가 뜨면(`shown`) 데몬 surface를 언맵하고 `set`에 응답한다.
+    fn show_web(
+        &mut self,
+        idx: usize,
+        url: String,
+        properties: serde_json::Map<String, serde_json::Value>,
+        opts: &WebOptions,
+        purpose: Purpose,
+    ) -> Result<()> {
+        if purpose == Purpose::Loading {
+            bail!("a web page cannot be used as appearance.loading");
+        }
+        if self.web_broken {
+            bail!("the web helper keeps crashing (see the log); `waywall reload` to try again");
+        }
+        if self.web.is_none() {
+            self.web = Some(WebHelper::spawn(self.webs.clone())?);
+        }
+        let out = &mut self.outputs[idx];
+        let show = Show {
+            output: out.name.clone(),
+            url,
+            properties,
+            // 퍼센트 → 0–1 (영상과 같음).
+            volume: f64::from(out.cfg.volume) / 100.0,
+            muted: out.cfg.mute || !opts.audio,
+            interactive: opts.interactive,
+            paused: out.is_paused(),
+            background: opts.background,
+            layer: self.config.surface.layer,
+            namespace: self.config.surface.namespace.clone(),
+            frame_timeout_ms: self.config.visibility.frame_timeout_ms,
+        };
+        let generation = out.next_generation();
+        out.pending = Some(Pending {
+            generation,
+            purpose,
+        });
+        out.incoming = None;
+        out.web = Some(WebPage {
+            generation,
+            purpose,
+            show: show.clone(),
+            audio: opts.audio,
+            shown: false,
+            hidden: false,
+            paused_sent: show.paused,
+        });
+        self.send_web(WebCommand::Show(Box::new(show)));
+        Ok(())
+    }
+
+    fn send_web(&mut self, cmd: WebCommand) {
+        if let Some(h) = &mut self.web {
+            h.send(&cmd);
+        }
+    }
+
+    fn index_by_name(&self, name: &str) -> Option<usize> {
+        self.outputs.iter().position(|o| o.name == name)
+    }
+
+    fn on_web(&mut self, msg: WebMsg) {
+        match msg {
+            WebMsg::Event(ev) => self.on_web_event(ev),
+            WebMsg::Exited { pid } => self.on_web_exit(pid),
+        }
+    }
+
+    fn on_web_event(&mut self, ev: WebEvent) {
+        tracing::debug!(event = ?ev, "from web helper");
+        match ev {
+            WebEvent::Ready | WebEvent::Hidden { .. } => {}
+            WebEvent::Shown { output } => {
+                let Some(idx) = self.index_by_name(&output) else {
+                    return;
+                };
+                let out = &mut self.outputs[idx];
+                let Some(page) = &mut out.web else { return };
+                if page.shown {
+                    return;
+                }
+                page.shown = true;
+                let purpose = page.purpose;
+                if out.pending.is_some_and(|p| p.generation == page.generation) {
+                    out.pending = None;
+                    out.loading = None;
+                }
+                out.show_web();
+                tracing::info!(output = %out.name, "web page shown");
+                if purpose == Purpose::Main {
+                    self.settle(idx, Ok(()));
+                }
+            }
+            WebEvent::Visibility { output, hidden } => {
+                let Some(idx) = self.index_by_name(&output) else {
+                    return;
+                };
+                if let Some(page) = &mut self.outputs[idx].web {
+                    page.hidden = hidden;
+                }
+                self.apply_pause(idx);
+            }
+            WebEvent::Error { output, message } => {
+                let Some(idx) = self.index_by_name(&output) else {
+                    return;
+                };
+                let out = &mut self.outputs[idx];
+                match &out.web {
+                    // 아직 뜨지 않았으면 배경 로딩 실패: 이전 화면(데몬 surface)이 그대로 있다.
+                    Some(page) if !page.shown => {
+                        let purpose = page.purpose;
+                        out.web = None;
+                        out.pending = None;
+                        self.send_web(WebCommand::Hide { output });
+                        self.failed(idx, purpose, anyhow!(message));
+                    }
+                    _ => {
+                        tracing::error!(output = %out.name, "web page: {message}");
+                        out.error = Some(message);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 헬퍼가 끝났다. 웹 배경이 남아 있으면 비정상 종료라 다시 띄운다(너무 자주 죽으면 포기).
+    fn on_web_exit(&mut self, pid: u32) {
+        if self.web.as_ref().is_none_or(|h| h.pid() != pid) {
+            return;
+        }
+        self.web = None;
+        let pages: Vec<usize> = (0..self.outputs.len())
+            .filter(|&i| self.outputs[i].web.is_some())
+            .collect();
+        if pages.is_empty() {
+            return;
+        }
+        let policy = &self.config.web_helper;
+        let window = Duration::from_secs(policy.restart_window_s);
+        let now = Instant::now();
+        self.web_crashes.retain(|t| now.duration_since(*t) < window);
+        self.web_crashes.push(now);
+        let respawned = if self.web_crashes.len() > policy.restart_limit as usize {
+            Err(anyhow!(
+                "the web helper exited {} times in {}s",
+                self.web_crashes.len(),
+                policy.restart_window_s
+            ))
+        } else {
+            WebHelper::spawn(self.webs.clone())
+        };
+        match respawned {
+            Ok(helper) => {
+                tracing::error!("web helper exited unexpectedly, restarting");
+                self.web = Some(helper);
+                for idx in pages {
+                    let out = &mut self.outputs[idx];
+                    let paused = out.is_paused();
+                    let Some(page) = &mut out.web else { continue };
+                    page.show.paused = paused;
+                    page.paused_sent = paused;
+                    let show = page.show.clone();
+                    self.send_web(WebCommand::Show(Box::new(show)));
+                }
+            }
+            Err(e) => {
+                tracing::error!("{e:#}; giving up on web wallpapers until reload");
+                self.web_broken = true;
+                for idx in pages {
+                    let out = &mut self.outputs[idx];
+                    let purpose = out.web.take().map_or(Purpose::Main, |p| p.purpose);
+                    out.pending = None;
+                    if out.unmapped {
+                        // configure 후 show_configured가 다시 시도하고, web_broken이라 오류 화면이 된다.
+                        out.request_remap();
+                    } else {
+                        self.failed(idx, purpose, anyhow!("{e:#}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// 웹에서 다른 배경으로 바뀌면 헬퍼 페이지를 닫는다. 데몬 surface를 다시 매핑해야 하면 configure까지 미루고 `true`.
+    fn leave_web(&mut self, idx: usize) -> bool {
+        let out = &self.outputs[idx];
+        if out.web.is_none() && !out.unmapped {
+            return false;
+        }
+        let next_is_web = !self.web_broken
+            && out.cfg.wallpaper.as_deref().is_some_and(|spec| {
+                wallpaper::resolve(spec, &self.config.detect, &self.layers.base_dir())
+                    .is_ok_and(|wp| wp.kind == WallpaperKind::Web)
+            });
+        if next_is_web {
+            return false;
+        }
+        let out = &mut self.outputs[idx];
+        if out.web.take().is_some() {
+            let output = out.name.clone();
+            self.send_web(WebCommand::Hide { output });
+        }
+        let out = &mut self.outputs[idx];
+        if !out.unmapped {
+            return false;
+        }
+        // `refresh`가 기다리는 `set`에 미리 응답하지 않도록 로딩 중으로 둔다.
+        let generation = out.next_generation();
+        out.pending = Some(Pending {
+            generation,
+            purpose: Purpose::Main,
+        });
+        out.request_remap();
+        true
     }
 
     // ── 영상 ──────────────────────────────────────────────────────────────
@@ -1252,6 +1550,20 @@ impl State {
     fn apply_pause(&mut self, idx: usize) {
         let out = &mut self.outputs[idx];
         let paused = out.is_paused();
+        if let Some(page) = &mut out.web
+            && page.paused_sent != paused
+        {
+            page.paused_sent = paused;
+            let output = out.name.clone();
+            if let Some(h) = &mut self.web {
+                h.send(&if paused {
+                    WebCommand::Pause { output }
+                } else {
+                    WebCommand::Resume { output }
+                });
+            }
+        }
+        let out = &mut self.outputs[idx];
         if paused == out.paused_applied {
             return;
         }
@@ -1376,6 +1688,10 @@ impl State {
             self.gpu = None;
             tracing::info!("GPU released (no shader or scene outputs)");
         }
+        if self.web.is_some() && !self.outputs.iter().any(|o| o.web.is_some()) {
+            self.web = None;
+            tracing::info!("web helper stopped (no web outputs)");
+        }
     }
 
     fn cmd_volume(
@@ -1423,6 +1739,16 @@ impl State {
             if let Some(v) = &mut out.incoming {
                 v.set_volume(cfg.volume, cfg.mute);
             }
+            if let Some(page) = &out.web {
+                let cmd = WebCommand::Volume {
+                    output: name.clone(),
+                    volume: f64::from(cfg.volume) / 100.0,
+                    muted: cfg.mute || !page.audio,
+                };
+                if let Some(h) = &mut self.web {
+                    h.send(&cmd);
+                }
+            }
             tracing::info!(output = %name, volume = cfg.volume, mute = cfg.mute, "volume");
         }
         Ok(Response::ok())
@@ -1434,6 +1760,8 @@ impl State {
     }
 
     fn cmd_reload(&mut self) -> Result<Response> {
+        self.web_broken = false;
+        self.web_crashes.clear();
         let layers = Layers::load(self.config_arg.as_deref())?;
         let config = layers.global()?;
         let content_changed = Table::try_from(&config.detect)?
@@ -1473,7 +1801,10 @@ impl State {
         for idx in 0..self.outputs.len() {
             let name = self.outputs[idx].name.clone();
             let cfg = self.output_config(&name)?;
-            let changed = content_changed || cfg != self.outputs[idx].cfg;
+            // 실패한 출력은 설정이 같아도 다시 시도한다 (예: 웹 헬퍼를 포기했던 출력).
+            let changed = content_changed
+                || cfg != self.outputs[idx].cfg
+                || self.outputs[idx].error.is_some();
             self.outputs[idx].cfg = cfg;
             if changed {
                 self.refresh(idx);

@@ -33,7 +33,8 @@ waywall quit
   (`set -o DP-1 a.png` 후 `set b.png` → 모든 출력이 `b.png`) 나중에 연결되는 출력에도 적용됩니다.
 - `-o`로 지정한 출력이 현재 연결되어 있지 않으면 오류입니다.
 - `reload`는 배경·볼륨·음소거 CLI 값을 지우고 설정 파일대로 되돌립니다. `pause` 상태는 설정이 아니라
-  상태이므로 `reload` 후에도 유지됩니다.
+  상태이므로 `reload` 후에도 유지됩니다. 배경 로딩에 실패한(`error`) 출력은 설정이 같아도 다시 시도합니다
+  (웹 헬퍼가 계속 죽어 포기했던 경우 포함).
 
 ### `--save`
 
@@ -150,7 +151,8 @@ stdout(헬퍼→데몬)으로 JSON-lines를 주고받고, 로그는 stderr로 �
 데몬 → 헬퍼:
 ```json
 {"op":"show","output":"DP-1","url":"file:///home/me/Wallpapers/stars/index.html",
- "properties":{"density":1.0},"volume":0.5,"muted":false,"interactive":true}
+ "properties":{"density":1.0},"volume":0.5,"muted":false,"interactive":true,"paused":false,
+ "background":"#000000","layer":"background","namespace":"waywall","frame_timeout_ms":1500}
 {"op":"hide","output":"DP-1"}
 {"op":"pause","output":"DP-1"}
 {"op":"resume","output":"DP-1"}
@@ -163,12 +165,16 @@ stdout(헬퍼→데몬)으로 JSON-lines를 주고받고, 로그는 stderr로 �
 ```json
 {"ev":"ready"}
 {"ev":"shown","output":"DP-1"}
+{"ev":"hidden","output":"DP-1"}
 {"ev":"visibility","output":"DP-1","hidden":true}
 {"ev":"error","output":"DP-1","message":"load failed: …"}
 ```
 
 - 헬퍼는 `pause`/`resume`을 frame 기아 판정과 무관하게 데몬 지시대로 따르고, frame 기아는 `visibility`로 보고만 합니다.
   pause 여부의 최종 결정은 항상 데몬이 합니다(사유 합성은 한 곳에서).
+- `show`는 그 출력의 이전 페이지를 바꾼다. `shown`은 페이지 로드가 끝났을 때, `hidden`은 `hide`를 처리했을 때 보낸다.
+- `show`를 받은 출력의 모니터가 아직 없으면(연결 직후) 모니터가 나타날 때 띄운다.
+- `properties`의 값은 JSON 값 그대로 `window.waywall.properties`에 들어간다(색은 `"#rrggbb"`, 불투명하지 않으면 `"#rrggbbaa"` 문자열).
 - stdin이 닫히면(데몬 종료) 헬퍼도 종료합니다.
 
 ## 로드맵: 이벤트 구독

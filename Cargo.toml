@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/waywall", "crates/waywall-proto"]
+members = ["crates/waywall", "crates/waywall-proto", "crates/waywall-web"]
 
 [workspace.package]
 version = "0.1.0"

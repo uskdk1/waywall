@@ -4,5 +4,6 @@ pub mod color;
 pub mod config;
 pub mod ipc;
 pub mod project;
+pub mod web;
 
 pub use color::Color;

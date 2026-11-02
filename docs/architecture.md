@@ -286,12 +286,22 @@ video는 GStreamer 채널 이벤트로 깨어나 버퍼만 attach합니다.
 
 ## 웹 헬퍼
 
-- 데몬이 웹 배경을 처음 설정할 때 `waywall-web`을 실행하고, 웹 배경이 하나도 없으면 종료시킴
-- 한 프로세스가 여러 출력의 웹 배경을 담당 (GTK 앱 하나, 출력마다 창 하나)
-- 통신: 헬퍼의 stdin/stdout JSON-lines ([cli-ipc.md](cli-ipc.md#웹-헬퍼-프로토콜))
-- 해당 출력의 데몬 layer surface는 웹 배경 동안 제거하고, 헬퍼가 같은 출력에 자체 layer surface를 띄움
-- 가림 판정: frame 기아는 헬퍼가 GTK `FrameClock`으로 감지해 보고하고, toplevel/niri 판정은 데몬이 해서 내려보냄
-- 헬퍼가 비정상 종료하면 데몬이 로그를 남기고 최대 3회 재시작, 그래도 실패하면 해당 출력을 `error` 상태로 둠
+- 데몬이 웹 배경을 처음 설정할 때 `waywall-web`을 실행하고(`WAYWALL_WEB_HELPER` → 데몬 실행 파일과 같은 디렉터리),
+  웹 배경이 하나도 없으면 `quit`을 보내 종료시킴
+- 한 프로세스가 여러 출력의 웹 배경을 담당 (GTK 앱 하나, 출력마다 layer 창 하나 + WebView)
+- 통신: 헬퍼의 stdin/stdout JSON-lines ([cli-ipc.md](cli-ipc.md#웹-헬퍼-프로토콜)). 데몬은 stdout을 읽는 스레드에서 calloop 채널로 받는다
+- **출력 맞추기:** 헬퍼는 커넥터 이름(`GdkMonitor::connector`)으로 모니터를 찾아 gtk4-layer-shell 창을 그 출력에 띄운다.
+  layer·namespace는 데몬 설정(`[surface]`)을 `show`로 받아 같은 값을 쓴다
+- **데몬 surface:** 웹 배경 동안 데몬의 그 출력 layer surface는 버퍼를 떼어(null attach) 언맵한다. 같은 layer에 두 surface가 겹치면
+  쌓임 순서가 정해져 있지 않기 때문이다. 다른 배경으로 바꿀 때는 초기 커밋 → configure를 다시 거친 뒤 그린다
+- **입력:** `interactive = false`면 헬퍼 창의 입력 영역을 비운다. 키보드는 받지 않는다(layer-shell keyboard interactivity none)
+- **가림 판정:** 웹 페이지는 정적이면 프레임이 없으므로, 헬퍼는 `frame_timeout_ms`마다 GTK `FrameClock`에 프레임 하나를 요청하고
+  그 프레임이 다음 주기까지 오지 않으면 `visibility hidden`을 보고한다(비용: 주기마다 한 장). toplevel/niri 판정은 데몬이 하고,
+  pause 여부의 최종 결정은 데몬이 사유를 합성해 `pause`/`resume`으로 내려보낸다
+- **오디오:** 음소거는 WebView 전체(`WebView::set_is_muted`), 볼륨은 페이지의 `<audio>`/`<video>` 요소에 JS로 적용한다.
+  WebKit에 페이지 전체 볼륨 API가 없어 WebAudio는 음소거만 따른다
+- **재시작:** 헬퍼가 비정상 종료하면 데몬이 로그를 남기고 다시 실행해 웹 출력을 다시 보낸다. `[web_helper]`의
+  `restart_window_s`초 안에 `restart_limit`번 죽으면 더 시도하지 않고 웹 출력을 `error` 상태로 둔다(`reload`·새 `set`으로 다시 시도)
 
 ## 이벤트 루프와 스레드
 

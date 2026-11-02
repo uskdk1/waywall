@@ -618,7 +618,8 @@ blend = "screen"
 - 배경은 불투명. 페이지가 투명한 부분은 `background` 옵션 색으로 채움
 - 키보드 입력은 받지 않음
 - 로컬 파일은 `file://`로 로드되며 같은 디렉터리 안의 리소스 접근 허용
-- 오디오(`<audio>`, `<video>`, WebAudio) 재생 가능, waywall 볼륨/음소거 반영
+- 오디오(`<audio>`, `<video>`, WebAudio) 재생 가능. 음소거는 모든 소리에, 볼륨은 `<audio>`/`<video>` 요소에 적용됩니다
+  (WebAudio는 음소거만 따름. 페이지가 `waywall-volume` 이벤트로 직접 맞출 수 있음)
 
 ### `window.waywall` API
 

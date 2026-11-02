@@ -144,6 +144,17 @@ shader 레이어 `render_scale`(레이어별 렌더 해상도)을 추가하고 �
 
 **완료 기준:** 예제 HTML이 마우스에 반응, 웹 배경을 지우면 헬퍼 종료, 헬퍼 강제 종료 시 재시작.
 
+**결과 (2026-11-02, niri, GTK 4.22 · WebKitGTK 2.52 · gtk4-layer-shell 1.3):** 예제 `examples/web/pointer/`가 `set` 후 0.55초에
+(페이지 로드 완료 시) 응답하고 마우스 이동·클릭에 반응. 웹 → 이미지로 바꾸면 데몬 surface를 다시 매핑해 그리고 헬퍼가 종료,
+다시 웹으로 바꾸면 헬퍼 재실행. 헬퍼를 SIGKILL하면 새 헬퍼가 같은 페이지를 다시 띄움. 60초 안에 4번째로 죽으면 포기하고 오류 화면,
+`reload`로 복구. `pause`가 페이지까지 전달되어 예제 페이지의 CPU가 헬퍼 6.2% + WebKit 렌더 프로세스 7.5% → 둘 다 0%, 데몬은 내내 0%.
+메모리는 WebKit 특성상 큼: 헬퍼 236 MB + 렌더 프로세스 203 MB + 네트워크 프로세스 78 MB. 데몬 종료 시 헬퍼·WebKit 프로세스 모두 종료.
+패키지 빌드(`nix build`)에서 래퍼가 헬퍼 경로를 넣고 GApps 환경으로 실행됨.
+**구현 중 발견:** layer surface를 언맵(null attach)하면 상태가 만든 직후로 돌아가서, 다시 매핑할 때 앵커·크기를 다시 보내지 않으면
+niri가 `width 0 requested without setting left and right anchors` 프로토콜 오류로 연결을 끊음.
+**미확인:** `interactive = false`의 입력 통과, frame 기아로 인한 `hidden` 보고(가린 상태를 만들지 못함), 오디오 볼륨(소리 나는 예제 없음),
+모니터를 연결하기 전에 받은 `show`(연결 시 띄우기).
+
 ## M8 — 예제와 마무리
 - `examples/`: 셰이더, 씬(반딧불 숲), 마우스 반응 HTML, 디렉터리형 배경(`project.toml` + properties)
 - 문서 갱신, systemd user 서비스 예제, niri `spawn-at-startup` 예제

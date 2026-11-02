@@ -36,12 +36,18 @@
         nativeBuildInputs = with pkgs; [
           pkg-config
           makeWrapper
+          wrapGAppsHook4
         ];
         gst = pkgs.gst_all_1;
         buildInputs = [
           pkgs.wayland
           gst.gstreamer
           gst.gst-plugins-base
+          # 웹 헬퍼 (waywall-web)
+          pkgs.gtk4
+          pkgs.gtk4-layer-shell
+          pkgs.webkitgtk_6_0
+          pkgs.glib-networking # https
         ];
         # 영상 재생에 쓰는 GStreamer 플러그인 (docs/development.md). 시스템 플러그인은 쓰지 않는다.
         gstPlugins = [
@@ -79,9 +85,14 @@
         waywall = rustPlatform.buildRustPackage (
           common
           // {
+            # 데몬은 GTK를 쓰지 않으므로 GApps 래핑은 헬퍼에만 (docs/development.md#런타임-경로)
+            dontWrapGApps = true;
             postFixup = ''
               wrapProgram $out/bin/waywall \
                 --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs} \
+                --set GST_PLUGIN_SYSTEM_PATH_1_0 ${gstPluginPath} \
+                --set WAYWALL_WEB_HELPER $out/bin/waywall-web
+              wrapGApp $out/bin/waywall-web \
                 --set GST_PLUGIN_SYSTEM_PATH_1_0 ${gstPluginPath}
             '';
             meta = {
@@ -136,6 +147,9 @@
           ]);
           LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
           GST_PLUGIN_SYSTEM_PATH_1_0 = gstPluginPath;
+          # 웹 헬퍼를 cargo run으로 돌릴 때: GTK 스키마, https(GIO 모듈)
+          XDG_DATA_DIRS = "${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}";
+          GIO_EXTRA_MODULES = "${pkgs.glib-networking}/lib/gio/modules";
           # 디버그 빌드의 wgpu가 검증 레이어를 찾도록
           VK_LAYER_PATH = "${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d";
         };

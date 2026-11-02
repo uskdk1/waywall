@@ -20,11 +20,20 @@ pub struct Config {
     pub surface: SurfaceConfig,
     pub render: Render,
     pub visibility: Visibility,
+    pub web_helper: WebHelperConfig,
     pub cursor: Cursor,
     pub appearance: Appearance,
     pub assets: AssetsConfig,
     pub detect: Detect,
     pub types: Types,
+}
+
+/// 웹 헬퍼 재시작 정책 (docs/architecture.md#웹-헬퍼).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebHelperConfig {
+    pub restart_limit: u32,
+    pub restart_window_s: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
