@@ -146,7 +146,16 @@ impl Page {
         window.set_exclusive_zone(-1);
         window.set_keyboard_mode(KeyboardMode::None);
 
-        let view = webkit6::WebView::new();
+        // 웹 프로세스 샌드박스에는 배경 디렉터리가 없어서, 웹 프로세스가 직접 여는 로컬 `<audio>`/`<video>`가
+        // 실패한다(페이지·이미지·fetch는 네트워크 프로세스가 읽어서 됨). 웹 프로세스가 뜨기 전에 넣어야 하므로 페이지마다 컨텍스트.
+        let context = webkit6::WebContext::new();
+        if let Some(dir) = gio::File::for_uri(&s.url)
+            .path()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        {
+            context.add_path_to_sandbox(dir, true);
+        }
+        let view = webkit6::WebView::builder().web_context(&context).build();
         if let Some(settings) = webkit6::prelude::WebViewExt::settings(&view) {
             settings.set_allow_file_access_from_file_urls(true);
             settings.set_media_playback_requires_user_gesture(false);
