@@ -514,7 +514,7 @@ effects = [
 | 타입 | 필드 | 설명 |
 |---|---|---|
 | `sway` | `strength`(px), `speed`, `scale`(1/px), `direction`(`[x, y]`) | 매끄러운 노이즈로 이미지를 `direction` 쪽으로 밀어 바람에 흔들리게 함. 미는 거리 = `strength × 마스크`라 마스크가 검은 곳(뿌리 쪽)은 고정 |
-| `shader` | `source`, `inputs` | 직접 쓴 효과 셰이더(Shadertoy GLSL 또는 WGSL). `iChannel0` = 효과를 적용할 이미지, `inputs`로 `iChannel1`–`iChannel3`에 이미지(경로)를 넣음. 결과를 마스크로 원본과 섞음 |
+| `shader` | `source`, `inputs` | 직접 쓴 효과 셰이더(Shadertoy GLSL 또는 WGSL). `iChannel0` = 효과를 적용할 이미지, `inputs`로 `iChannel1`–`iChannel3`에 이미지(경로)를 넣음. 생략한 채널 `filter`·`wrap`은 shader 레이어처럼 `[types.scene.shader] channel`(기본 `wrap = "clamp"`)에서 옴. 결과를 마스크로 원본과 섞음 |
 
 생략한 필드는 `[types.scene.effects.<type>]`(사용자 값 > `defaults.toml`)을 쓰며, 사용자가 그 섹션에 적은 값은 씬의 값보다 우선합니다.
 

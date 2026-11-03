@@ -44,7 +44,8 @@ GIF는 아직 첫 프레임만 표시(애니메이션은 M4의 영상 경로에�
 (스레드 1개로 복귀). 컴파일 오류는 `bad.glsl:3:10: Unknown variable: …`처럼 사용자 파일 줄 번호로 `set`이 거절(이전 배경 유지).
 swapchain은 Bgra8Unorm(Shadertoy와 같은 색). 단위 테스트 30개.
 커서 호버·클릭 반응은 사용자가 직접 확인. `render.max_fps` 기본값을 0(모니터 주사율)으로 바꾼 뒤 240 Hz HDMI 출력에서 약 218fps(CPU 약 12%, 내장 GPU 거의 최대 클럭), `waywall list`에 실측 fps 표시.
-**미확인:** HiDPI(분수 스케일) 출력에서의 선명도 — 이 환경의 두 출력은 모두 스케일 1.
+**추가 확인 (2026-11-03):** `niri msg output eDP-1 scale 1.5`에서 GPU 배경이 `list`에 `1920x1080@1.5`(논리 1280x720)로 실제 픽셀 크기로
+렌더되고 육안으로 선명함(공용 `GpuView`라 캐릭터 씬으로 확인).
 
 ## M4 — 동영상 (zero-copy) ✅
 - GStreamer 파이프라인, VA-API 디코딩 → dmabuf → `zwp_linux_dmabuf_v1` → 서브서피스
@@ -59,7 +60,9 @@ swapchain은 Bgra8Unorm(Shadertoy와 같은 색). 단위 테스트 30개.
 움직이는 GIF는 shm 경로로 약 10fps·CPU 1%. 오디오 스트림이 PipeWire에 `waywall`로 나감.
 **구현 중 발견:** VA 디코더는 받는 쪽이 `VideoMeta`를 지원한다고 알려야 dmabuf를 내보내므로 appsink 패드의 allocation 쿼리에 추가.
 libav GIF 디먹서는 비flush segment seek를 처리하지 못해 GIF만 flush seek로 반복.
-**미확인:** 볼륨 크기 변화(귀로 확인 필요), 하드웨어 디코더가 없는 환경에서 dmabuf → shm 자동 폴백(초기 구현 중 협상 실패로 우연히 동작은 확인).
+**추가 확인 (2026-11-03):** 440 Hz 사인파 영상에서 `waywall volume` 100 → 30 → 5 → `--mute` → `--unmute`에 따라 소리 크기가 바뀌는 것을 귀로 확인.
+`LIBVA_DRIVER_NAME=none`으로 VA-API를 막고 1080p60 H.264를 `set`하자 dmabuf 협상 실패 후 shm으로 다시 시작해
+`list`에 `shm-fallback 58.5fps`, 데몬 CPU 약 58%(`hwdec = false`의 69%와 같은 소프트웨어 디코딩 수준).
 
 ## M5 — 가림 감지 ✅
 - frame 타임아웃 → foreign_toplevel → niri (설정 `visibility.niri`)
@@ -71,8 +74,8 @@ libav GIF 디먹서는 비flush segment seek를 처리하지 못해 GIF만 flush
 `paused … 0.0fps (covered:foreign_toplevel)`, 해제하자 즉시 재개되어 1초 뒤 60fps. `pause_when = "any-window"` + `visibility.niri = true`에서
 창이 있는 워크스페이스로 옮기면 `covered:niri`로 멈추고 빈 워크스페이스로 옮기면 재개. frame 콜백 감시(`Hidden`)·정책 판정·niri 이벤트 반영은
 단위 테스트. 
-**미확인:** niri가 전체화면 창 아래 background layer에 frame 콜백을 끊는지(`Hidden` 신호원이 실제로 켜지는 경우).
-`pause_when = "never"`로 잰 첫 측정에서는 `hidden`이 한 번도 뜨지 않았으나, 그 시간에 전체화면이 있었는지는 기록하지 못함.
+**추가 확인 (2026-11-03):** `pause_when = "never"`, `foreign_toplevel`·`niri` 신호원을 끈 상태에서 창을 전체화면으로 만들면
+`frame_timeout_ms` 뒤 `list`에 `hidden`이 뜨고 멈춤. niri는 전체화면 창 아래 background layer에 frame 콜백을 보내지 않음.
 
 ## M6 — 씬 렌더러 ✅
 - M6a: 씬 로더, image 레이어, 패럴랙스, HDR 버퍼 + 톤매핑
@@ -92,7 +95,7 @@ libav GIF 디먹서는 비flush segment seek를 처리하지 못해 GIF만 flush
 가상 포인터로 커서를 움직이면 깨어나 약 60fps로 그리고, 멈추면 정착 후 잠듦: 8초간 CPU tick 0, 자발적 문맥 전환 0회.
 파티클 레이어가 있는 씬은 `[[layer]] \`fireflies\`: particles layers are not supported yet (M6b)`로 거절되고 이전 배경 유지.
 셰이더 배경은 공용 `GpuView`로 옮김. 단위 테스트 43개(+씬 로더·변환·패럴랙스·내장 셰이더 검증·예제 로드).
-**미확인:** 레이어마다 다른 깊이로 움직이는 모습(육안 확인 필요), 분수 스케일 출력.
+**추가 확인 (2026-11-03):** 레이어마다 다른 깊이로 움직이는 모습을 육안으로 확인. 분수 스케일(1.5)에서도 선명(M3 추가 확인 참고).
 
 **M6b 완료 기준:** 예제 씬(반딧불 숲, `examples/scenes/fireflies/`)이 60fps로 돌고 반딧불이 커서에 끌려옴, 클릭하면 그 자리에서
 burst. 파티클 10만 개에서도 데몬 CPU가 파티클 수와 관계없이 미미. burst 전용 레이어만 있는 씬은 파티클이 다 사라지면 잠듦.
@@ -103,7 +106,7 @@ HDMI-A-1 약 119fps. 반딧불 3000개에서 데몬 CPU 17.8%, 같은 씬을 10�
 CPU는 프레임 수에 비례하고 파티클 수와 무관). burst 전용 씬은 표시 후 8초간 CPU tick 0, 자발적 문맥 전환 0회.
 `circle`에 `radius`가 없는 씬은 `[[layer]] #1: \`emitter.radius\` is required for circle (> 0)`로 거절되고 이전 배경 유지.
 방출 수(소수부 이월·고리 버퍼·`max` 상한)와 잠들기 판단은 단위 테스트. 단위 테스트 51개.
-**미확인:** 커서 쪽으로 끌려오는 반딧불과 클릭 burst(육안 확인 필요. 사용 중인 화면이라 가상 포인터 테스트를 하지 않음).
+**추가 확인 (2026-11-03):** 커서 쪽으로 끌려오는 반딧불과 클릭 burst를 육안으로 확인.
 
 **M6c 완료 기준:** 예제 씬 `examples/scenes/sunlight/`의 햇빛 셰이더 레이어가 `"below"`(아래 그림)의 밝은 부분에서
 빛줄기를 냄. 예제 `examples/scenes/lights/`에서 노멀맵 벽이 커서를 따라가는 점광원에 입체적으로 반응하고 횃불이 흔들림.
@@ -117,8 +120,7 @@ CPU는 프레임 수에 비례하고 파티클 수와 무관). burst 전용 씬�
 회귀: 패럴랙스 예제(`tonemap = "none"`, 블룸 기본값, 패럴랙스 끔)를 M6b 빌드와 비교해 최대 1/255 차이가 0.04% 픽셀(191개)에서 남.
 image 셰이더에 조명 분기·바인딩이 늘며 생긴 부동소수 반올림으로 봄. 단위 테스트 50개(+채널 입력 계층, `iChannelResolution` 배열 배치,
 광원 버퍼·흔들림, 블룸 단계 크기).
-**미확인:** 커서를 따라가는 점광원과 빛줄기 광원(육안 확인 필요), 횃불 흔들림(창에 가려 캡처하지 못함, 값은 단위 테스트),
-분수 스케일 출력.
+**추가 확인 (2026-11-03):** 커서를 따라가는 점광원, 빛줄기 광원, 횃불 흔들림을 육안으로 확인. 분수 스케일은 M3 추가 확인 참고.
 
 **M6c 이후 최적화 (2026-11-02):** perf로 보니 CPU의 큰 몫이 Intel Vulkan 드라이버가 커맨드 버퍼를 초기화할 때의 `memset`(16.7%)이었고,
 블룸의 렌더 패스 7개(축소 4 + 확대 3)가 그 원인 중 하나. 블룸을 compute 패스 하나로 합치고, shader 레이어를 가능하면 HDR 버퍼에 직접
@@ -136,7 +138,10 @@ shader 레이어 `render_scale`(레이어별 렌더 해상도)을 추가하고 �
 머리카락 윤곽에만 생기고 얼굴 안쪽·배경은 그대로(sway가 마스크 안에서만 움직임). 눈동자를 옆으로 밀어 둔 변형에서 흰자 밖 부분이
 잘림(clip). 효과 파일 uniform을 이름으로 채우기·`follow` 계산(최대 이동, 거리 비례, 패럴랙스 기준점, `on_leave`)·필드 검사는 단위 테스트.
 빛줄기 예제의 일정한 샘플 간격 때문에 생긴 줄무늬(창문 모양이 사슬처럼 반복)를 픽셀마다 시작점 지터로 없앰. 단위 테스트 54개.
-**미확인:** 커서를 따라보는 눈동자(육안 확인 필요), `type = "shader"` 효과(단위 검사만, 예제 없음).
+**추가 확인 (2026-11-03):** 커서를 따라보는 눈동자를 육안으로 확인(스케일 1.5 출력 포함).
+`type = "shader"` 효과(GLSL, 물결 왜곡 + 1초마다 색 바꾸기 + `iChannel1` 체커)를 캐릭터 예제의 방 레이어에 왼쪽 절반 마스크로 걸자
+왼쪽 절반만 효과가 적용되고 오른쪽·다른 레이어는 그대로. `iChannel1`은 기본 `wrap = "clamp"`라 `uv * 8`로 읽으면 왼쪽 아래 1/8에만
+무늬가 생김(GLSL uv 원점이 왼쪽 아래인 것도 확인). `wrap = "repeat"`를 주면 전체에 반복.
 
 ## M7 — 웹 헬퍼 ✅
 - `waywall-web` 크레이트, 헬퍼 프로토콜, 프로세스 수명 관리
@@ -152,8 +157,15 @@ shader 레이어 `render_scale`(레이어별 렌더 해상도)을 추가하고 �
 패키지 빌드(`nix build`)에서 래퍼가 헬퍼 경로를 넣고 GApps 환경으로 실행됨.
 **구현 중 발견:** layer surface를 언맵(null attach)하면 상태가 만든 직후로 돌아가서, 다시 매핑할 때 앵커·크기를 다시 보내지 않으면
 niri가 `width 0 requested without setting left and right anchors` 프로토콜 오류로 연결을 끊음.
-**미확인:** `interactive = false`의 입력 통과, frame 기아로 인한 `hidden` 보고(가린 상태를 만들지 못함), 오디오 볼륨(소리 나는 예제 없음),
-모니터를 연결하기 전에 받은 `show`(연결 시 띄우기).
+**추가 확인 (2026-11-03):** 웹 배경 출력의 창을 전체화면으로 만들면 헬퍼의 frame 기아 보고로 `list`에 `hidden`이 뜨고 멈춤.
+웹 배경 중 `niri msg output HDMI-A-1 off` → `on`으로 핫플러그를 흉내 내자 헬퍼 재시작 없이 다시 연결된 출력에 페이지가 뜨고
+`shown`으로 `playing`. 다만 `show`가 GDK 모니터보다 먼저 와서 모니터 추가 시 띄우는 경로를 탔는지는 로그가 없어 구분하지 못함.
+`interactive = false`로 바꾼 예제 사본은 마우스 이동·클릭에 전혀 반응하지 않음(입력 영역 비움).
+**발견·수정 (2026-11-03):** 로컬 `<audio src="tone.wav">`가 `MEDIA_ERR_SRC_NOT_SUPPORTED`(networkState 3)로 재생되지 않음.
+같은 파일을 `fetch` → blob URL로 재생하거나 WebAudio 오실레이터는 소리가 났음. 원인은 WebKit 웹 프로세스의 bubblewrap 샌드박스에
+배경 디렉터리가 없는 것(페이지·이미지·`fetch`는 네트워크 프로세스가 읽어서 됨, 미디어 파일은 웹 프로세스가 직접 엶).
+페이지마다 `WebContext`를 만들어 웹 프로세스가 뜨기 전에 배경 디렉터리를 읽기 전용으로 `add_path_to_sandbox`하자 PipeWire에 `WebKit` 스트림이 생김.
+`waywall volume`·`--mute`의 값이 `window.waywall`과 `<audio>` 요소의 `volume`·`muted`에 반영되는 것을 확인.
 
 ## M8 — 예제와 마무리 ✅
 - `examples/`: 셰이더, 씬(반딧불 숲), 마우스 반응 HTML, 디렉터리형 배경(`project.toml` + properties)
