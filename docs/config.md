@@ -143,6 +143,39 @@ density = 2.0
 | `restart_limit` | int | `3` | 웹 헬퍼가 `restart_window_s`초 안에 이만큼 비정상 종료하면 더 띄우지 않고 웹 출력을 `error`로 둠(`reload`나 새 `set`으로 다시 시도) |
 | `restart_window_s` | int | `60` | 위 횟수를 세는 기간(초) |
 
+### `[live2d]` (설계, M9)
+
+> 설계 단계. M9b에서 공식 Cubism Core 백엔드를 고를 때만 생깁니다([roadmap.md](roadmap.md#m9--live2d-레이어-설계)).
+
+| 키 | 타입 | 내장값 | 설명 |
+|---|---|---|---|
+| `core` | 경로 | `""` | 사용자가 Live2D에서 받아 둔 Cubism Core 공유 라이브러리(`libLive2DCubismCore.so`). 비어 있거나 열 수 없으면 `live2d` 레이어가 이유와 함께 거절되고, 다른 배경은 영향 없음 |
+
+Core는 독점 라이선스라 waywall 패키지에 들어 있지 않습니다. 받는 방법과 라이선스 조건은 [development.md](development.md#live2d-cubism-core-설계-m9).
+
+**캐릭터 레이어 기본값 초안.** 구현할 때 `assets/defaults.toml`의 `[types.scene.live2d]`·`[types.scene.vrm]`에 들어갈 키입니다
+(형식은 [wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm-설계)). 값은 구현하며 정합니다.
+
+```toml
+[types.scene.live2d]       # 아직 defaults.toml에 없음 (M9)
+render_scale = 1.0
+scale    = 1.0
+idle     = "Idle"
+physics  = true
+look_at  = { range = 600.0, smoothing = 0.12, on_leave = "center", params = { ParamAngleX = 30.0, ParamAngleY = 30.0, ParamEyeBallX = 1.0, ParamEyeBallY = 1.0 } }
+blink    = { enabled = true, interval = [2.0, 6.0] }
+breath   = { enabled = true, params = { ParamBreath = 1.0 } }
+
+[types.scene.vrm]          # 아직 defaults.toml에 없음 (M10)
+render_scale = 1.0
+camera   = { target = "head", distance = 1.6, height = 0.0, fov = 25.0, yaw = 0.0, pitch = 0.0 }
+look_at  = { range = 600.0, smoothing = 0.12, on_leave = "center", head = 0.3 }
+blink    = { enabled = true, interval = [2.0, 6.0] }
+spring_bone = { enabled = true, wind = [0.0, 0.0, 0.0], wind_speed = 0.5 }
+light    = "scene"
+outline  = true
+```
+
 ### `[visibility]`
 
 | 키 | 타입 | 내장값 | 설명 |

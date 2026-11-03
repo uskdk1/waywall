@@ -104,6 +104,19 @@ Nix로 빌드한 프로그램은 시스템의 Vulkan ICD/VA-API 드라이버(`/u
   nix run --impure github:nix-community/nixGL#nixVulkanIntel -- ./result/bin/waywall daemon
   ```
 
+## Live2D Cubism Core (설계, M9)
+
+[M9b](roadmap.md#m9--live2d-레이어-설계)에서 공식 Cubism Core 백엔드를 고를 때의 방침입니다.
+
+- Cubism Core는 독점 라이선스(Live2D Proprietary Software License)이고 Live2D 사이트에서 약관에 동의해야 받을 수 있어,
+  **저장소·flake 입력·Nix 패키지에 넣지 않습니다.** `nix build`와 `nix flake check`는 Core 없이 통과해야 합니다.
+- 데몬은 Core를 링크하지 않고 실행 중에 `dlopen`합니다(경로는 config [`[live2d] core`](config.md#live2d-설계-m9)).
+  wgpu가 libvulkan을 `dlopen`하는 것과 같은 방식이라 빌드 입력이 늘지 않습니다.
+- 통합 테스트에서 Core가 필요하면 사용자가 받은 파일을 로컬 경로로 넘깁니다. nixpkgs의 `requireFile`(사용자가 직접
+  `nix-store --add-fixed`로 넣는 파일)로 감싼 선택 패키지를 둘지는 M9b에서 정합니다.
+- 배포 라이선스: 개인·소규모 사업자(연 매출 1천만 엔 미만)는 면제지만 "확장 가능한 앱"은 예외입니다. waywall이 여기에 해당하는지는
+  열린 질문입니다([roadmap.md](roadmap.md#m9--live2d-레이어-설계)).
+
 ## 툴체인/의존성 업데이트
 
 ```sh

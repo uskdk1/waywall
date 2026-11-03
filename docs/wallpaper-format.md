@@ -173,6 +173,24 @@ iChannel1 = { source = "textures/rock.jpg", filter = "nearest", wrap = "clamp" }
 - 셰이더 배경의 출력이 변환 없이 화면에 쓰이는 것처럼, 채널 값도 Shadertoy와 같이 **변환 없이** 읽힙니다
   (sRGB 값 그대로, 알파를 곱하지 않음).
 
+#### 채널 개수 제한 해제 (설계)
+
+> **설계 단계.** 지금은 `iChannel0`–`iChannel3`만 받고 `iChannel4` 이상은 거절됩니다. 계획은
+> [roadmap.md](roadmap.md#m8b--셰이더-채널-개수-제한-해제-설계). 구현하면 이 절의 제목·앵커도 `iChannelN`으로 바꿉니다.
+
+4개 제한은 Shadertoy를 따라 한 것일 뿐 GPU 한계가 아닙니다. waywall 배경은 waywall에서 돌리므로 Shadertoy 사이트로 되돌려
+올리는 호환은 목표가 아니고(`iPointer`·`iClick`·`u_<속성>`도 이미 waywall 확장), **Shadertoy 셰이더를 가져다 쓰는 쪽만** 지킵니다.
+
+- `[inputs]`(셰이더 배경), shader 레이어 `inputs`, `shader` 효과 `inputs`에 `iChannel<N>`을 원하는 만큼 씁니다(N은 0부터의 정수).
+- 셰이더가 받는 채널 수 = `max(4, 쓴 가장 큰 N + 1)`. `iChannel0`–`iChannel3`은 늘 선언되므로 입력을 지정하지 않은 Shadertoy 셰이더도
+  지금과 똑같이 컴파일됩니다. 중간에 비운 채널(예: 0과 7만 지정)은 1×1 투명 텍스처, 해상도 0입니다.
+- 상한은 코드에 숫자로 두지 않고 GPU 어댑터 한도(`max_sampled_textures_per_shader_stage`, `max_samplers_per_shader_stage`)에서 정합니다.
+  넘으면 그 한도 값과 함께 거절됩니다.
+- GLSL은 `iChannel<N>`·`iChannelResolution[N]`, WGSL은 `channel<N>`·`channel<N>_sampler`·`g.channel_resolution[N]` — 이름 규칙은 0–3과 같습니다.
+- 바인딩 규칙: 0 = uniform, 1–N = 채널 텍스처, N+1–2N = 채널 샘플러(지금의 1–4 / 5–8을 일반화).
+- 채널 선언은 waywall이 채널 수만큼 만들어 프리앰블의 표시 줄(`// @waywall:channels`) 자리에 넣고, `iChannelResolution` 배열 크기도
+  그 수로 정합니다. 사용자 assets의 프리앰블 교체 파일도 이 표시 줄을 두면 됩니다.
+
 ## 씬 배경
 
 빛, 파티클, 패럴랙스, 블룸을 선언적으로 조합하는 형식입니다. `project.toml`의 `type = "scene"`,
@@ -489,7 +507,7 @@ HDR 장면 ─▶ + 블룸 × intensity ─▶ × exposure ─▶ tonemap ─▶
 
 ### 구현 상태
 
-이 문서의 씬 기능은 모두 동작합니다. 레이어 타입이 지원하지 않는 필드(예: particles의 `clip`)를 쓰면
+이 문서의 씬 기능은 [캐릭터 레이어](#캐릭터-레이어-live2d--vrm-설계)(설계 단계)를 빼고 모두 동작합니다. 레이어 타입이 지원하지 않는 필드(예: particles의 `clip`)를 쓰면
 배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다.
 
 ### 레이어 효과 (`effects`)
@@ -601,9 +619,138 @@ inputs = { iChannel0 = "below" }
 blend = "screen"
 ```
 
+### 캐릭터 레이어 (live2d · vrm, 설계)
+
+> **설계 단계, 아직 구현되지 않음.** 쓰면 이유와 함께 거절됩니다. 계획은 [roadmap.md](roadmap.md#m9--live2d-레이어-설계)의 M9(Live2D)·M10(VRM).
+> 필드 이름과 구성은 구현하며 바뀔 수 있습니다.
+
+리깅된 캐릭터 모델을 레이어로 띄웁니다. `live2d`는 일러스트가 그대로 움직이는 2D 모델(`.moc3`), `vrm`은 3D 툰 모델(`.vrm`)입니다.
+
+**공통 규칙**
+
+- 모델은 `rect` 크기(× `render_scale`)의 자기 HDR 텍스처에 그린 뒤 텍스처 경유 shader 레이어처럼 장면에 합성합니다.
+  그래서 공통 필드 `blend`·`opacity`·`parallax`·`visible`과 `clip`이 그대로 적용되고, 블룸·톤매핑을 함께 받으며,
+  레이어 순서로 파티클을 모델 앞이나 뒤에 둡니다. 다른 shader 레이어의 입력(레이어 `id`)으로도 쓸 수 있습니다.
+- 출력은 shader 레이어와 같이 선형, premultiplied RGBA입니다. 모델 텍스처는 image 레이어처럼 sRGB로 읽어 선형화합니다.
+- **시선(`look_at`):** 포인터 쪽을 봅니다. 계산은 [`follow`](#포인터-따라가기-follow)와 같은 모델입니다
+  (`anchor`·`range`·`smoothing`·`on_leave`, 방향 = `normalize(포인터 − anchor) × min(1, 거리 / range)`). 이 값을 모델의
+  시선·머리 회전으로 옮기는 방법만 타입마다 다릅니다. `follow`는 이 레이어 타입에 쓰지 않습니다(레이어 자체를 옮기려면 `parallax`).
+- **클릭(`on_click`):** 왼쪽 클릭한 곳이 모델의 어느 부위인지 판정해 그 부위의 모션을 한 번 재생하고 대기 모션으로 돌아갑니다.
+  `interactive = true`일 때만 동작합니다.
+- 대기 모션·눈 깜빡임·숨쉬기·물리로 늘 움직이므로 이 레이어가 있는 씬은 잠들지 않습니다. 비용은 사용자가 `fps`·`render_scale`로 정합니다(기본 상한 없음).
+- 생략한 필드는 `[types.scene.live2d]` · `[types.scene.vrm]`(사용자 값 > `defaults.toml`)에서 옵니다.
+
+| 필드 (공통) | 설명 |
+|---|---|
+| `model` | 모델 파일 (배경 디렉터리 기준). 필수 |
+| `rect` | 그릴 영역 `[x, y, 폭, 높이]` (설계 px). 생략하면 설계 영역 전체 |
+| `render_scale` | 이 레이어를 그리는 해상도 배율 (shader 레이어와 같음) |
+| `look_at` | `{ anchor, range, smoothing, on_leave, … }` 위 공통 규칙 + 타입별 필드 |
+| `on_click` | 부위 이름 → 모션 (타입별) |
+| `blink` | 자동 눈 깜빡임 `{ enabled, interval }` (`interval` = `[최소, 최대]` 초) |
+
+#### live2d
+
+Cubism 모델(`.model3.json` + `.moc3` + 텍스처·모션·물리 파일)을 그립니다.
+
+```toml
+[[layer]]
+type     = "live2d"
+id       = "miku"
+model    = "model/miku.model3.json"
+rect     = [460, 0, 1000, 1080]
+position = [500, 560]          # rect 안에서 모델 캔버스 중심
+scale    = 1.0
+idle     = "Idle"              # model3.json Motions의 그룹 이름 (그룹 안에서 무작위)
+look_at  = { anchor = [960, 300], range = 700, params = { ParamAngleX = 30, ParamAngleY = 30, ParamEyeBallX = 1, ParamEyeBallY = 1, ParamBodyAngleX = 10 } }
+on_click = { Head = "TapHead", Body = "TapBody" }   # HitArea 이름 → 모션 그룹
+parameters = { ParamCheek = "$blush" }              # 고정 파라미터 값 (속성으로 조절)
+```
+
+| 필드 | 설명 |
+|---|---|
+| `model` | `.model3.json`. 거기 적힌 `.moc3`·텍스처·`physics3.json`·`pose3.json`·표정·모션 파일을 읽음 |
+| `position`, `scale` | `rect` 안에서 모델 캔버스의 중심과 배율 |
+| `idle` | 대기 모션 그룹 이름. 그룹 안의 모션을 무작위로 이어 재생 |
+| `look_at.params` | 파라미터 이름 → 최대값. 시선 방향의 x(오른쪽 +)·y(위 +) 성분에 최대값을 곱해 넣음. `…X` 이름은 x, `…Y` 이름은 y 성분 |
+| `on_click` | `model3.json` HitArea 이름 → 모션 그룹. 클릭한 곳이 HitArea의 drawable 메시 안이면 재생 |
+| `physics` | `physics3.json` 적용 여부(bool) |
+| `breath` | 숨쉬기(파라미터 사인파) `{ enabled, params }` |
+| `parameters` | 파라미터 이름 → 고정값. 모션보다 나중에 적용. `"$속성"` 사용 가능 |
+| `expression` | 처음부터 켜 둘 표정 이름(`model3.json` Expressions). 생략하면 없음 |
+
+런타임 백엔드(순수 Rust 구현 또는 사용자가 받아 둔 공식 Cubism Core)는 M9b에서 정합니다. Core 경로라면 Core 파일 위치는
+config [`[live2d] core`](config.md#live2d-설계-m9)입니다.
+
+#### vrm
+
+VRM 1.0 모델(glTF 2.0 + `VRMC_*` 확장)을 레이어 안의 3D 카메라로 그립니다. 깊이 버퍼는 레이어 안에서만 씁니다(씬 전체는 2D 합성 그대로).
+
+```toml
+[[layer]]
+type      = "vrm"
+id        = "miku"
+model     = "model/miku.vrm"
+rect      = [360, 0, 1200, 1080]
+camera    = { target = "head", distance = 1.6, height = -0.15, fov = 25, yaw = 0, pitch = 0 }
+animation = "anim/idle.vrma"   # 반복 재생할 대기 모션
+look_at   = { range = 700, head = 0.4 }
+on_click  = { head = "anim/nod.vrma", chest = "anim/wave.vrma" }
+expressions = { happy = "$smile" }
+spring_bone = { wind = [0.3, 0.0, 0.0], wind_speed = 0.5 }
+```
+
+| 필드 | 설명 |
+|---|---|
+| `model` | `.vrm` 파일 |
+| `camera` | `target`(휴머노이드 본 이름, 바라볼 점) · `distance`(m) · `height`(m, target 기준 세로 오프셋) · `fov`(도, 세로) · `yaw`·`pitch`(도) |
+| `animation` | 대기 모션 `.vrma`. 생략하면 기본 자세 + 숨쉬기 |
+| `look_at` | 공통 필드 + `head`(머리가 시선을 따라 도는 비율 0–1, 나머지는 눈). 각도 한계는 모델의 `lookAt` 범위 |
+| `on_click` | 휴머노이드 본 이름 → `.vrma`. 클릭 지점에서 모델로 광선을 쏴 맞은 삼각형의 가장 큰 스킨 가중치 본(또는 그 조상 중 키에 있는 본) |
+| `expressions` | 표정 프리셋·커스텀 이름 → 가중치 0–1(고정). `"$속성"` 사용 가능 |
+| `spring_bone` | `{ enabled, wind, wind_speed }`. `wind`는 모델 공간 방향 × 세기, `wind_speed`는 바람이 바뀌는 빠르기 |
+| `light` | MToon 조명. `"scene"`이면 씬의 `directional`·`ambient` 광원을 씀(없으면 아래 값). 또는 `{ direction, color, intensity, ambient }` |
+| `outline` | MToon 외곽선 그리기 여부(bool) |
+
+MToon 셰이더는 `assets/shaders/vrm/` 파일이며 사용자 assets 디렉터리에서 교체할 수 있습니다.
+
+#### 빛 가리기 (빛줄기와 캐릭터·레이어)
+
+창문에서 들어오는 빛줄기를 캐릭터나 다른 레이어가 가리게 하는 패턴입니다. 지금 있는 기능(shader 레이어 + 레이어 `id` 입력)으로 되며,
+캐릭터 레이어도 레이어 입력이 될 수 있으므로 그대로 적용됩니다.
+
+[예제 빛줄기 셰이더](../examples/scenes/character/sunlight.glsl)는 픽셀마다 광원 쪽으로 샘플을 찍어 밝은 픽셀을 더합니다.
+`"below"`를 입력으로 쓰면 광원 앞에 있는 캐릭터의 어두운 픽셀이 빛을 내지 않아 그 모양대로 빛줄기에 그림자 줄이 생기지만,
+캐릭터의 밝은 부분(흰 옷, 하이라이트)도 빛을 냅니다. **빛을 내는 입력과 가리는 입력을 나누면** 이 문제가 없습니다.
+
+```toml
+[[layer]]
+type    = "shader"
+id      = "sunrays"
+source  = "sunrays.glsl"
+inputs  = { iChannel0 = "sky", iChannel1 = "wall", iChannel2 = "curtain", iChannel3 = "miku" }
+blend   = "add"
+```
+
+```
+샘플마다:  빛 = 광원 입력의 밝은 픽셀 × Π (1 − 가리는 입력의 알파)
+```
+
+- 투명한 곳(알파 0)은 그대로 통과합니다. 벽 사진에 창문 모양을 뚫어 두면 거기로만 빛이 들어옵니다.
+- 반투명(예: 커튼 알파 0.5)은 일부만 통과합니다. 가리는 입력의 색을 곱하면 스테인드글라스처럼 빛에 색이 입혀집니다.
+- 레이어 입력은 패럴랙스·`follow`·캐릭터 모션이 반영된 현재 모습이라, 움직이면 그림자 줄도 같이 움직입니다.
+- 가리는 레이어 수는 채널 수만큼입니다. 지금은 광원 1 + 가림 3이 최대이고, [채널 개수 제한 해제](#채널-개수-제한-해제-설계) 후에는 GPU 한도까지입니다.
+  움직이지 않는 사진들은 미리 합친 마스크 PNG 하나를 경로 입력으로 넣어도 됩니다.
+
+**되지 않는 것:**
+- 캐릭터 몸에 비치는 빛(창문 쪽이 밝고 반대쪽이 어두운 음영). 캐릭터 레이어는 `[[light]]`를 받지 않습니다. live2d에 `lit`을
+  줄지는 열린 질문입니다(Live2D 모델에는 노멀맵이 없어 방향감이 약함). vrm은 MToon `light`로 음영을 받습니다.
+- 바닥·벽에 떨어지는 캐릭터 그림자. 화면 공간 계산이라 투영 그림자는 없습니다. 그림자 이미지를 `multiply` 레이어로 두거나,
+  vrm에 그림자 맵을 넣는 것(열린 질문)으로 다룹니다.
+
 ### 상호작용 요약
-- 커서 이동: `parallax`, `follow`, `light.position = "pointer"`, `particles.pointer`
-- 클릭: `emitter.burst`, 셰이더 레이어의 `iClick`
+- 커서 이동: `parallax`, `follow`, `light.position = "pointer"`, `particles.pointer`, 캐릭터 레이어 `look_at`(설계)
+- 클릭: `emitter.burst`, 셰이더 레이어의 `iClick`, 캐릭터 레이어 `on_click`(설계)
 
 ### 성능 팁
 - 무거운 블룸/셰이더 레이어는 `render_scale = 0.75` 같은 값으로 비용을 크게 줄일 수 있습니다.

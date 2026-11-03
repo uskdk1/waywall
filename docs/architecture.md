@@ -119,6 +119,9 @@ playbin3 (file:// URI)
 - 분수 스케일·`render_scale`: swapchain을 `물리 픽셀 × render_scale` 크기로 만들고 viewporter destination을 논리 크기로 설정.
   확대는 컴포지터가 하므로 업스케일 패스가 필요 없음
 - 셰이더 컴파일(naga 파싱·검증, 파이프라인 생성)은 메인 스레드에서 동기적으로 함. 오류는 `set` 응답과 `list`에 표시
+- 채널 수: 지금은 4 고정(`backend/shader.rs` `CHANNELS`). [M8b](roadmap.md#m8b--셰이더-채널-개수-제한-해제-설계)(설계)에서 셰이더마다
+  `max(4, 쓴 가장 큰 번호 + 1)`로 정하고, 프리앰블의 `// @waywall:channels` 자리에 채널 선언을 생성하며, 바인드 그룹 레이아웃도 그 수로 만든다.
+  상한은 어댑터 한도(`max_sampled_textures_per_shader_stage` · `max_samplers_per_shader_stage`)
 
 shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuView`(`backend/view.rs`) 하나로 공유하고,
 "한 장 그리기"만 렌더러(`Shadertoy` / `Scene`)가 다릅니다.
@@ -176,6 +179,18 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
   그리기는 `particles/render.wgsl` + 스프라이트 파일을 이어 붙인 레이어 전용 파이프라인(블렌드·스프라이트가 레이어마다 다름)으로
   `draw(0..4, 0..max)`. 죽은 파티클은 버텍스 셰이더가 화면 밖으로 보낸다.
   CPU는 "마지막 방출 시각 + 최대 수명"을 기억해 모든 파티클이 죽었는지 안다(잠들기 판단).
+- **캐릭터 레이어 (live2d · vrm, 설계 — [roadmap.md](roadmap.md#m9--live2d-레이어-설계) M9/M10):** 텍스처 경유 shader 레이어와 같은 길을 쓴다.
+  레이어마다 `rect` 렌더 크기의 `Rgba16Float` 텍스처에 모델을 그리고(투명 바탕, premultiplied), image 파이프라인 사각형으로
+  `blend`·`opacity`·`parallax`·`clip`을 적용해 합성한다. 레이어 id 입력·`clip` 대상이 되면 그 텍스처를 그대로 넘긴다.
+  - 시선·클릭은 메인 스레드의 레이어 상태가 처리한다: `follow`와 같은 지수 추적으로 시선 벡터를 만들고, 클릭은 렌더 px → 모델 공간으로
+    바꿔 부위를 판정한 뒤 모션을 시작한다. 모션·물리 적분은 프레임마다 CPU(`dt`는 파티클과 같은 `max_step` 상한).
+  - **live2d:** 백엔드가 파라미터 → drawable 메시(정점·UV·불투명도·그리기 순서·마스크)를 만들고, 렌더는 waywall의 wgpu 파이프라인
+    (`assets/shaders/live2d/`)이 한다. 클리핑 마스크는 마스크 drawable을 먼저 마스크 텍스처에 그려 알파를 곱한다. 백엔드는 trait 하나로 감싸
+    mocari와 `dlopen`한 Cubism Core를 바꿔 끼울 수 있게 한다(M9b에서 하나로 정함). Core가 없으면 로드 단계에서 그 레이어만 거절.
+  - **vrm:** 로드 시 glTF를 읽어 정점·인덱스·텍스처를 출력마다 업로드. 프레임마다 CPU가 `.vrma` 샘플링 → 휴머노이드 포즈 → LookAt → SpringBone
+    → 본 행렬을 storage 버퍼로 쓰고, 버텍스 셰이더가 스키닝·모프를 한다(모프 가중치도 storage 버퍼). 깊이 버퍼(`Depth32Float`)는
+    레이어 텍스처 크기로 레이어 안에서만 쓴다. MToon은 불투명 → 알파 컷 → 반투명(뒤에서 앞으로 정렬) 순서, 외곽선은 법선 방향으로 부풀린
+    뒷면 패스.
 - **잠들기:** `draw`가 "아직 움직이는 중"(패럴랙스가 목표에 도달하지 않음, 살아 있는 파티클이 있음, `rate > 0`, shader 레이어, 조명 `flicker`)을 돌려줄 때만 다음 frame 콜백에서 다시 그린다.
   아니면 렌더 루프를 멈추고, 포인터 이동(패럴랙스·파티클 `pointer`가 있을 때)·클릭(`burst`가 있을 때)·크기 변경·`reload`에서만 한 장 그린다. 정적인 씬은 표시 후 비용 0.
 

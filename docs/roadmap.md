@@ -177,6 +177,63 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 실행 파일 경로만 설치에 맞게 고침)와 `contrib/niri/config.kdl`(`niri validate` 통과)을 두고 `docs/setup.md`(설치·실행·자동 시작)에 설명.
 예제를 실제로 등록하지는 않음. 문서의 지난 마일스톤 표기(“M6c부터”, “M6d로”) 정리.
 
+## M8b — 셰이더 채널 개수 제한 해제 (설계)
+`iChannel0`–`iChannel3` 고정(`backend/shader.rs`의 `CHANNELS = 4`, 프리앰블의 채널 선언 4쌍과 `iChannelResolution[4]`)을 없앤다.
+4개는 Shadertoy를 따라 한 값일 뿐이고, waywall 배경을 Shadertoy 사이트로 되돌려 올릴 일은 없으므로 가져오는 쪽 호환(0–3 그대로)만 지킨다.
+설계는 [wallpaper-format.md](wallpaper-format.md#채널-개수-제한-해제-설계).
+
+- 채널 수를 셰이더마다 `max(4, 쓴 가장 큰 N + 1)`로 정하고, 상한은 GPU 어댑터 한도에서 읽음(코드에 숫자 없음)
+- 프리앰블 GLSL·WGSL의 채널 선언을 표시 줄(`// @waywall:channels`) 자리에 생성, `iChannelResolution` 크기도 생성
+- 셰이더 배경 `[inputs]`, 씬 shader 레이어 `inputs`, `shader` 효과 `inputs`(1번부터)에 모두 적용
+- 고정 배열(`[_; CHANNELS]`)을 쓰는 곳: `backend/shader.rs`, `backend/scene/{mod, load, shader_layer, effects}.rs`, `daemon.rs`
+- 테스트: `iChannel4` 거절 테스트를 "어댑터 한도 초과 거절"로 바꾸고, 0과 높은 번호만 지정한 입력·채널 수 계산·생성된 프리앰블의 naga 검증 추가
+- 구현하면 문서 절 제목 `텍스처 입력 (iChannel0–iChannel3)`과 그 앵커를 쓰는 곳(문서 2곳, 프리앰블 주석 2곳, `examples/shaders/ripple/ripple.glsl`)을 함께 고침
+
+**완료 기준:** 기존 예제(ripple, sunlight, character)가 그대로 동작하고 Shadertoy 셰이더가 수정 없이 컴파일됨. 광원 1 + 가림 레이어 4개 이상을
+입력으로 받는 빛줄기 셰이더가 각 레이어의 투명한 곳으로만 빛을 통과시킴([빛 가리기](wallpaper-format.md#빛-가리기-빛줄기와-캐릭터레이어)).
+
+## M9 — Live2D 레이어 (설계)
+캐릭터 일러스트가 그대로 움직이는 2D 리깅 모델을 씬 레이어로 띄운다. 형식 설계는
+[wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm-설계).
+
+`.moc3`(Cubism)가 사실상 표준이지만 공식 런타임 Cubism Core는 소스가 공개되지 않은 독점 라이선스라 저장소·Nix 패키지에 넣어
+배포할 수 없다. 그래서 백엔드를 먼저 정한다.
+
+- M9a: **mocari 검증** — 순수 Rust `.moc3` 런타임([docs.rs/mocari](https://docs.rs/mocari), wgpu 렌더러 있음)을 실제 모델로 확인:
+  물리(physics3), 클리핑 마스크, 블렌드 모드, 모션·표정, 눈 깜빡임·숨쉬기, 성능. 라이선스와 아래 열린 질문도 함께 확인
+- M9b: **백엔드 결정** — mocari, 또는 공식 Cubism Core를 런타임에 `dlopen`(사용자가 받아 둔 파일, 경로는 config
+  [`[live2d] core`](config.md#live2d-설계-m9)). Core 경로에서는 waywall이 Core 없이 빌드·실행되고, live2d 레이어만 이유와 함께 거절한다
+- M9c: 구현 — 씬 `live2d` 레이어, 포인터 시선, HitArea 클릭 모션, 예제 씬
+
+**열린 질문:**
+- mocari의 라이선스와 완성도. 비공식 런타임으로 `.moc3`를 읽는 것이 모델 판매처 약관이나 Live2D 측 입장에 걸리는지(걸리면 Core 경로)
+- Cubism 배포 라이선스는 개인·소규모 사업자(연 매출 1천만 엔 미만)를 면제하지만 "확장 가능한 앱(Expandable Application)"은 예외다.
+  아무 모델이나 불러오는 waywall이 여기에 해당하는지
+- live2d 레이어에 `lit`(씬 `[[light]]` 음영)을 줄지. 노멀맵이 없어 방향감이 약하고, 빛 가리기는 `lit` 없이도 됨
+  ([빛 가리기](wallpaper-format.md#빛-가리기-빛줄기와-캐릭터레이어))
+
+**완료 기준:** 예제 씬에서 Live2D 모델이 대기 모션·눈 깜빡임·숨쉬기로 움직이고, 커서를 따라보며, 머리를 클릭하면 그 HitArea의 모션이 재생됨.
+모델 뒤·앞의 파티클과 블룸이 함께 보임. Core 경로라면 Core가 없을 때 다른 배경에는 영향 없이 그 레이어만 거절.
+
+## M10 — VRM 레이어 (설계)
+3D 툰 캐릭터를 씬 레이어로 띄운다. VRM은 glTF 2.0 기반 공개 표준이라 Nix 패키지에 그대로 들어간다.
+형식 설계는 [wallpaper-format.md](wallpaper-format.md#vrm).
+
+- glTF 로딩(`gltf` 크레이트): 메시, 텍스처, 스킨, 모프 타깃, VRM 확장(`VRMC_vrm`, `VRMC_materials_mtoon`, `VRMC_springBone`)
+- GPU 스키닝 + 모프 타깃, 레이어 내부 깊이 버퍼
+- MToon 셰이더(그림자 단계, 림라이트, 외곽선). `assets/shaders/vrm/` 파일이라 교체 가능
+- SpringBone(머리카락·옷 흔들림, CPU), 표정 프리셋(눈 깜빡임 등), LookAt(포인터)
+- VRM Animation(`.vrma`) 재생: 대기 모션, 클릭 모션
+
+**열린 질문:** VRM 0.x 모델 지원 범위(1.0과 확장 이름·좌표계가 다름). 클릭 판정 방식(본 영역 레이캐스트로 충분한지).
+바닥·벽에 떨어지는 그림자(그림자 맵)를 넣을지.
+
+**완료 기준:** 예제 씬에서 VRM 모델이 `.vrma` 대기 모션으로 움직이고 머리카락이 SpringBone으로 흔들리며, 커서를 따라보고, 클릭하면
+모션이 재생됨. MToon 외곽선·그림자가 표준 뷰어와 비슷하게 보임. 파티클·블룸과 함께 합성됨.
+
+**순서:** M9a에서 라이선스나 기능 때문에 막히면 M10을 먼저 한다. 두 레이어는 같은 합성 경로(자기 텍스처에 그린 뒤 shader 레이어처럼
+합성)를 쓰므로 먼저 하는 쪽이 그 경로를 만든다.
+
 ## 이후
 - 씬 정지 레이어 캐시: 구현·측정했으나 Iris Xe에서 이득이 없어 보류. 설계·측정·되살릴 조건·주의점은 [architecture.md](architecture.md#보류한-최적화-정지-레이어-캐시)
 - GUI 매니저(썸네일 라이브러리, 속성 편집) — IPC `subscribe` 스트림 기반
