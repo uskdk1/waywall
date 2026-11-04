@@ -145,21 +145,13 @@ density = 2.0
 
 ### 캐릭터 레이어 (설계, M9–M11)
 
-Live2D 런타임은 waywall에 들어 있는 PurismCore 하나라 고를 설정이 없습니다([development.md](development.md#live2d-purismcore-설계-m9)).
+Live2D 런타임은 waywall에 들어 있는 PurismCore 하나라 고를 설정이 없습니다([development.md](development.md#live2d-purismcore-m9)).
 
-**캐릭터 레이어 기본값 초안.** 구현할 때 `assets/defaults.toml`의 `[types.scene.live2d]`·`[types.scene.vrm]`·`[types.scene.spine]`에 들어갈 키입니다
-(형식은 [wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm--spine-설계)). 값은 구현하며 정합니다.
+**캐릭터 레이어 기본값.** live2d는 `assets/defaults.toml`의 `[types.scene.live2d]`(아래 [`[types.<타입>]`](#types타입--배경-타입별-기본-옵션) 참고)에 있고,
+vrm·spine은 구현할 때 `[types.scene.vrm]`·`[types.scene.spine]`에 들어갈 키의 초안입니다
+(형식은 [wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm--spine)). 초안 값은 구현하며 정합니다.
 
 ```toml
-[types.scene.live2d]       # 아직 defaults.toml에 없음 (M9)
-render_scale = 1.0
-scale    = 1.0
-idle     = "Idle"
-physics  = true
-look_at  = { range = 600.0, smoothing = 0.12, on_leave = "center", params = { ParamAngleX = 30.0, ParamAngleY = 30.0, ParamEyeBallX = 1.0, ParamEyeBallY = 1.0 } }
-blink    = { enabled = true, interval = [2.0, 6.0] }
-breath   = { enabled = true, params = { ParamBreath = 1.0 } }
-
 [types.scene.vrm]          # 아직 defaults.toml에 없음 (M10)
 render_scale = 1.0
 camera   = { target = "head", distance = 1.6, height = 0.0, fov = 25.0, yaw = 0.0, pitch = 0.0 }
@@ -332,6 +324,18 @@ max_step   = 0.1          # 한 프레임 시뮬레이션의 최대 dt(초)
 [types.scene.shader]       # shader 레이어 필드
 channel = { filter = "linear", wrap = "clamp" }
 render_scale = 1.0
+
+[types.scene.live2d]       # live2d 레이어 필드 (docs/wallpaper-format.md#live2d)
+scale        = 1.0          # 모델 캔버스 px → 설계 px
+render_scale = 1.0
+idle         = "Idle"       # 대기 모션 그룹
+fade         = 1.0          # 모션 파일이 정하지 않았을 때 페이드(초)
+max_step     = 0.1          # 한 프레임 모션 진행의 최대 dt(초)
+blink     = { enabled = true, interval = [2.0, 6.0], closing = 0.1, closed = 0.05, opening = 0.15 }
+breath    = { enabled = true, params = { ParamBreath = { offset = 0.5, peak = 0.5, cycle = 3.2345, weight = 0.5 } } }
+physics   = { enabled = true, gravity = [0.0, -1.0], wind = [0.0, 0.0] }
+pose_fade = 0.5
+look_at   = { enabled = true, range = 600.0, smoothing = 0.12, on_leave = "center", params = { ParamAngleX = 30.0, ParamAngleY = 30.0, ParamEyeBallX = 1.0, ParamEyeBallY = 1.0, ParamBodyAngleX = 10.0 } }
 
 [types.scene.light.ambient]   # [[light]]에서 생략한 필드 (사용자가 적으면 scene.toml 값보다 우선)
 color     = "#ffffff"

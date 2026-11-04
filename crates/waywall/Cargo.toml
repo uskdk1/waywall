@@ -38,3 +38,6 @@ wayland-protocols = { version = "0.32.13", features = ["client", "staging", "uns
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 waywall-proto = { version = "0.1.0", path = "../waywall-proto" }
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan", "glsl", "wgsl", "naga-ir", "std"] }
+
+[build-dependencies]
+cc = "1.11.0"

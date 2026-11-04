@@ -506,7 +506,7 @@ HDR 장면 ─▶ + 블룸 × intensity ─▶ × exposure ─▶ tonemap ─▶
 
 ### 구현 상태
 
-이 문서의 씬 기능은 [캐릭터 레이어](#캐릭터-레이어-live2d--vrm--spine-설계)(설계 단계)를 빼고 모두 동작합니다. 레이어 타입이 지원하지 않는 필드(예: particles의 `clip`)를 쓰면
+이 문서의 씬 기능은 [캐릭터 레이어](#캐릭터-레이어-live2d--vrm--spine)의 vrm·spine(설계 단계)을 빼고 모두 동작합니다. 레이어 타입이 지원하지 않는 필드(예: particles의 `clip`)를 쓰면
 배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다.
 
 ### 레이어 효과 (`effects`)
@@ -618,10 +618,10 @@ inputs = { iChannel0 = "below" }
 blend = "screen"
 ```
 
-### 캐릭터 레이어 (live2d · vrm · spine, 설계)
+### 캐릭터 레이어 (live2d · vrm · spine)
 
-> **설계 단계, 아직 구현되지 않음.** 쓰면 이유와 함께 거절됩니다. 계획은 [roadmap.md](roadmap.md#m9--live2d-레이어-설계)의 M9(Live2D)·M10(VRM)·M11(Spine, 보류).
-> 필드 이름과 구성은 구현하며 바뀔 수 있습니다.
+> **live2d는 구현됨(M9).** vrm·spine은 설계 단계라 쓰면 이유와 함께 거절됩니다. 계획은 [roadmap.md](roadmap.md#m9--live2d-레이어-)의
+> M10(VRM)·M11(Spine, 보류). 설계 단계 필드는 구현하며 바뀔 수 있습니다.
 
 리깅된 캐릭터 모델을 레이어로 띄웁니다. `live2d`는 일러스트가 그대로 움직이는 2D 모델(`.moc3`), `vrm`은 3D 툰 모델(`.vrm`),
 `spine`은 본·메시 변형 기반 2D 스켈레탈 애니메이션(Spine `.skel`/`.json` + `.atlas`)입니다.
@@ -657,20 +657,19 @@ blend = "screen"
 
 #### live2d
 
-Cubism 모델(`.model3.json` + `.moc3` + 텍스처·모션·물리 파일)을 그립니다.
+Cubism 모델(`.model3.json` + `.moc3` + 텍스처·모션·물리·포즈 파일)을 그립니다. **구현됨 (M9).**
 
 ```toml
 [[layer]]
 type     = "live2d"
 id       = "miku"
 model    = "model/miku.model3.json"
-rect     = [460, 0, 1000, 1080]
-position = [500, 560]          # rect 안에서 모델 캔버스 중심
-scale    = 1.0
-idle     = "Idle"              # model3.json Motions의 그룹 이름 (그룹 안에서 무작위)
-look_at  = { anchor = [960, 300], range = 700, params = { ParamAngleX = 30, ParamAngleY = 30, ParamEyeBallX = 1, ParamEyeBallY = 1, ParamBodyAngleX = 10 } }
-on_click = { Head = "TapHead", "*" = "Tap" }        # HitArea 이름 → 모션 그룹, 나머지 모델 위는 "Tap"
-parameters = { ParamCheek = "$blush" }              # 고정 파라미터 값 (속성으로 조절)
+rect     = [560, 30, 800, 1050]
+scale    = 0.85                  # 캔버스 px → 설계 px
+idle     = "Idle"                # model3.json Motions의 그룹 이름 (그룹 안에서 무작위)
+look_at  = { anchor = [960, 250], range = 700 }
+on_click = { Body = "Tap@Body", "*" = "Tap" }   # HitArea 이름 → 모션 그룹, 나머지 모델 위는 "Tap"
+physics  = { wind = [0.3, 0.0] }                # 바람
 ```
 
 HitArea가 없는 모델(예: Live2D 공식 미쿠 샘플은 `"HitAreas": []`)은 모션 하나만 적거나 drawable을 직접 지정합니다.
@@ -682,15 +681,26 @@ on_click = { "drawable:ArtMesh54" = "TapHead", "*" = "Tap" }  # 특정 drawable�
 
 | 필드 | 설명 |
 |---|---|
-| `model` | `.model3.json`. 거기 적힌 `.moc3`·텍스처·`physics3.json`·`pose3.json`·표정·모션 파일을 읽음 |
-| `position`, `scale` | `rect` 안에서 모델 캔버스의 중심과 배율 |
-| `idle` | 대기 모션 그룹 이름. 그룹 안의 모션을 무작위로 이어 재생 |
-| `look_at.params` | 파라미터 이름 → 최대값. 시선 방향의 x(오른쪽 +)·y(위 +) 성분에 최대값을 곱해 넣음. `…X` 이름은 x, `…Y` 이름은 y 성분 |
+| `model` | `.model3.json`. 거기 적힌 `.moc3`·텍스처·`physics3.json`·`pose3.json`·모션 파일을 읽음 |
+| `rect` | 그릴 영역 `[x, y, 폭, 높이]` (설계 px). 생략하면 설계 영역 전체 |
+| `position` | `rect` 안에서 모델 캔버스 중심의 위치 (rect 기준 설계 px). 생략하면 rect 중심 |
+| `scale` | 캔버스 px → 설계 px 배율 (캔버스 크기는 모델마다 다름. 화면 높이에 맞추려면 `rect` 높이 / 캔버스 높이) |
+| `render_scale` | 이 레이어를 그리는 해상도 배율 (shader 레이어와 같음) |
+| `idle` | 대기 모션 그룹 이름. 그룹 안의 모션을 무작위로 이어 재생하고, 끝나 갈 때 다음 모션을 겹쳐 들인다(크로스페이드). 모델에 그 그룹이 없으면 있는 그룹 목록과 함께 거절 |
+| `fade` | 모션 파일·`model3.json`이 페이드 시간을 정하지 않았을 때 들어오고 나가는 시간(초) |
+| `max_step` | 한 프레임 모션·물리 진행의 최대 dt(초). 오래 멈췄다 깨어나도 튀지 않게 함 |
+| `blink` | 자동 눈 깜빡임 `{ enabled, interval = [최소, 최대], closing, closed, opening }`(초). `model3.json` Groups `EyeBlink`의 파라미터에 0–1을 곱함(모션이 정한 눈 모양 위에) |
+| `breath` | 숨쉬기 `{ enabled, params = { 파라미터 = { offset, peak, cycle, weight } } }`. `(offset + peak × sin(2π t / cycle)) × weight`를 더함 |
+| `physics` | `physics3.json` 물리 `{ enabled, gravity, wind }`. `gravity`·`wind`는 사슬 좌표 `[x, y]`(y 위로 +) |
+| `pose_fade` | `pose3.json`이 정하지 않았을 때, 포즈 그룹(예: 팔 두 세트)에서 파츠가 바뀌며 페이드하는 시간(초) |
+| `look_at` | `{ enabled, anchor, range, smoothing, on_leave, params }`. `params`: 파라미터 이름 → 최대값. 시선 방향의 x(오른쪽 +)·y(위 +) 성분 × 최대값을 모션 위에 더함. `…X`로 끝나는 이름은 x, `…Y`는 y 성분(다른 이름은 거절). 모델에 없는 파라미터는 무시 |
 | `on_click` | 모션 그룹 하나, 또는 표. 표의 키는 `model3.json` HitArea 이름(그 HitArea의 drawable 메시 안), `drawable:<ID>`(그 drawable 메시 안), `"*"`. 모르는 키는 그 모델의 HitArea 이름 목록과 함께 거절 |
-| `physics` | `physics3.json` 적용 여부(bool) |
-| `breath` | 숨쉬기(파라미터 사인파) `{ enabled, params }` |
-| `parameters` | 파라미터 이름 → 고정값. 모션보다 나중에 적용. `"$속성"` 사용 가능 |
-| `expression` | 처음부터 켜 둘 표정 이름(`model3.json` Expressions). 생략하면 없음 |
+
+- 파라미터 이름은 모델마다 다릅니다. 예전 형식 모델(예: 미쿠 FREE판)은 `PARAM_ANGLE_X`·`PARAM_BREATH`처럼 쓰므로 `look_at.params`·`breath.params`를
+  그 이름으로 적어야 합니다(모델에 없는 이름은 조용히 무시되어 움직이지 않음).
+- 매 프레임 순서(Cubism 프레임워크와 같음): 기본값 → 모션(페이드·크로스페이드) → 시선 → 눈 깜빡임 → 숨쉬기 → 물리 → 포즈 → Core 메시 갱신.
+- 클리핑 마스크는 레이어 해상도 그대로 그린다(픽셀 단위로 정확). 가산·곱하기 블렌드 drawable은 지원하지만, 이것을 쓰는 모델로는 아직 확인하지 못했다.
+- **아직 없는 것:** 표정(`model3.json` Expressions), 고정 파라미터 값(`parameters`), 립싱크, Cubism 5.3의 확장 블렌드 모드·오프스크린(렌더링 시 일반 블렌드로 그림).
 
 런타임은 waywall에 들어 있는 PurismCore(Cubism Core 호환 오픈소스 재구현, MIT)입니다(M9b). 읽지 못하는 모델은 이유와 함께 거절됩니다.
 

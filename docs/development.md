@@ -58,7 +58,8 @@ direnv 사용자는 `.envrc`에 `use flake`를 두면 디렉터리 진입 시 �
 inputs
 ├─ nixpkgs        (nixos-unstable, flake.lock으로 커밋 고정)
 ├─ rust-overlay   (oxalica, nixpkgs follows)
-└─ flake-utils
+├─ flake-utils
+└─ purism-core    (SakuraMotion/PurismCore 태그, flake = false — Live2D 런타임 소스)
 
 outputs (x86_64-linux, aarch64-linux)
 ├─ packages.default / packages.waywall   데몬 + 웹 헬퍼
@@ -78,6 +79,7 @@ outputs (x86_64-linux, aarch64-linux)
 | 데몬 | `gst_all_1.gstreamer`, `gst-plugins-base`, `gst-plugins-good`, `gst-plugins-bad`(va 디코더), `gst-libav`(소프트웨어 폴백, GIF) | 영상 |
 | 데몬 | `libva` | VA-API |
 | 웹 헬퍼 | `gtk4`, `gtk4-layer-shell`, `webkitgtk_6_0`, `glib` | 웹 배경 |
+| 데몬 | `purism-core` (flake 입력, C 소스) | Live2D 런타임. `build.rs`가 컴파일해 정적 링크 |
 | 선택 | `shaderc` | feature `shaderc` |
 
 ### 런타임 경로
@@ -104,15 +106,20 @@ Nix로 빌드한 프로그램은 시스템의 Vulkan ICD/VA-API 드라이버(`/u
   nix run --impure github:nix-community/nixGL#nixVulkanIntel -- ./result/bin/waywall daemon
   ```
 
-## Live2D: PurismCore (설계, M9)
+## Live2D: PurismCore (M9)
 
-[M9b](roadmap.md#m9--live2d-레이어-설계)의 방침입니다. **라이선스 허가가 필요한 의존은 최대한 쓰지 않습니다.**
+[M9b](roadmap.md#m9--live2d-레이어-)의 방침입니다. **라이선스 허가가 필요한 의존은 최대한 쓰지 않습니다.**
 
 - [SakuraMotion/PurismCore](https://github.com/SakuraMotion/PurismCore)(MIT, C99)는 Cubism Core를 API·ABI 그대로 대신하는
   오픈소스 재구현입니다. flake 입력(태그 커밋 고정)으로 받아 Nix에서 빌드하고 데몬에 정적 링크하므로 사용자가 따로 받을 파일이 없습니다.
   ABI는 v6(Core 6.0, Purism 기본값)을 씁니다. 의존은 libc·libm뿐입니다.
+- 빌드: flake가 소스 경로를 `PURISM_CORE_SRC`로 넘기고(devShell과 패키지 모두), `crates/waywall/build.rs`가 `cc` 크레이트로 C 소스를
+  컴파일해 정적 링크합니다. devShell 밖에서 `cargo build`하면 이 변수가 없어 빌드가 멈춥니다(`nix develop` 안에서 빌드).
+- 패키지는 MIT 고지를 위해 `share/licenses/waywall/PurismCore.LICENSE`를 함께 설치합니다.
+- 버전 올리기: `flake.nix`의 `purism-core` URL 태그를 바꾸고 `nix flake update purism-core`, 그 버전 Makefile의 `SRC` 목록과
+  `build.rs`의 `SOURCES`가 같은지 확인합니다.
 - 공식 Cubism Core(독점 라이선스, Live2D 사이트에서 약관 동의 후 다운로드)는 쓰지 않으며, 바꿔 끼우는 경로도 두지 않습니다.
-- mocari(순수 Rust)는 제작자가 행방불명되어 취소했습니다([roadmap.md](roadmap.md#m9--live2d-레이어-설계)).
+- mocari(순수 Rust)는 제작자가 행방불명되어 취소했습니다([roadmap.md](roadmap.md#m9--live2d-레이어-)).
 
 ## Spine 런타임 (보류, M11)
 

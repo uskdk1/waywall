@@ -180,16 +180,18 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
   그리기는 `particles/render.wgsl` + 스프라이트 파일을 이어 붙인 레이어 전용 파이프라인(블렌드·스프라이트가 레이어마다 다름)으로
   `draw(0..4, 0..max)`. 죽은 파티클은 버텍스 셰이더가 화면 밖으로 보낸다.
   CPU는 "마지막 방출 시각 + 최대 수명"을 기억해 모든 파티클이 죽었는지 안다(잠들기 판단).
-- **캐릭터 레이어 (live2d · vrm · spine, 설계 — [roadmap.md](roadmap.md#m9--live2d-레이어-설계) M9–M11):** 텍스처 경유 shader 레이어와 같은 길을 쓴다.
+- **캐릭터 레이어 (live2d · vrm · spine, 설계 — [roadmap.md](roadmap.md#m9--live2d-레이어-) M9–M11):** 텍스처 경유 shader 레이어와 같은 길을 쓴다.
   레이어마다 `rect` 렌더 크기의 `Rgba16Float` 텍스처에 모델을 그리고(투명 바탕, premultiplied), image 파이프라인 사각형으로
   `blend`·`opacity`·`parallax`·`clip`을 적용해 합성한다. 레이어 id 입력·`clip` 대상이 되면 그 텍스처를 그대로 넘긴다.
   - 시선·클릭은 메인 스레드의 레이어 상태가 처리한다: `follow`와 같은 지수 추적으로 시선 벡터를 만들고, 클릭은 렌더 px → 모델 공간으로
     바꿔 부위를 판정한 뒤 모션을 시작한다. 판정은 CPU에서 지금 프레임의 메시로 한다(GPU 읽기 없음): 부위 키의 메시(HitArea·`drawable:<ID>`·
     바운딩 박스·본 가중치) → `"*"`/문자열이면 보이는 메시 전체, 겹치면 그리기 순서가 위인 쪽. 어디에도 안 맞으면 그 클릭은 이 레이어가 쓰지 않는다. 모션·물리 적분은 프레임마다 CPU(`dt`는 파티클과 같은 `max_step` 상한).
   - **live2d:** 백엔드가 파라미터 → drawable 메시(정점·UV·불투명도·그리기 순서·마스크)를 만들고, 렌더는 waywall의 wgpu 파이프라인
-    (`assets/shaders/live2d/`)이 한다. 클리핑 마스크는 마스크 drawable을 먼저 마스크 텍스처에 그려 알파를 곱한다. 백엔드는 정적 링크한
+    (`assets/shaders/live2d/`, `backend/scene/live2d_layer.rs`)이 한다. UV·인덱스는 처음에 한 번, 위치만 프레임마다 올리고, drawable 값(불투명도·마스크·색)은
+    동적 오프셋 uniform 하나. 클리핑 마스크는 마스크 drawable 목록이 같은 drawable끼리 R8 텍스처 하나(레이어 해상도 그대로)를 써서, 마스크 drawable 알파를
+    `1 − Π(1 − a)`로 합쳐 두고 본 패스에서 같은 픽셀 값을 곱한다(반전 마스크는 1 − 값). 모델이 바뀐 프레임에만 다시 그린다. 백엔드는 정적 링크한
     PurismCore(Cubism Core C ABI v6) 하나다(M9b). Core는 메시 변형만 하므로
-    `.motion3.json`·`.physics3.json`·`.pose3.json`·표정 적용과 모션 크로스페이드, 눈 깜빡임·숨쉬기는 waywall이 파라미터 배열에 쓴 뒤 `csmUpdateModel`을
+    `.motion3.json`·`.physics3.json`·`.pose3.json` 적용과 모션 크로스페이드, 시선, 눈 깜빡임·숨쉬기는 waywall(`live2d/`)이 파라미터 배열에 쓴 뒤 `csmUpdateModel`을
     부른다. Core가 모델을 읽지 못하면(`csmReviveMocInPlace` 실패, 모르는 MOC 버전) 로드 단계에서 그 레이어만 거절.
   - **vrm:** 로드 시 glTF를 읽어 정점·인덱스·텍스처를 출력마다 업로드. 프레임마다 CPU가 `.vrma` 샘플링 → 휴머노이드 포즈 → LookAt → SpringBone
     → 본 행렬을 storage 버퍼로 쓰고, 버텍스 셰이더가 스키닝·모프를 한다(모프 가중치도 storage 버퍼). 깊이 버퍼(`Depth32Float`)는

@@ -13,20 +13,22 @@ use toml::{Table, Value};
 use waywall_proto::Color;
 use waywall_proto::color::{linear_to_srgb, srgb_to_linear};
 use waywall_proto::config::{
-    Blend, ChannelDefaults, Emitter, EmitterShape, OnLeave, ParticlePointer, PointerMode, Ramp,
-    Scale, SceneOptions, Span, Turbulence, VelocityRange,
+    Blend, ChannelDefaults, Emitter, EmitterShape, Live2dBlink, Live2dBreath, Live2dLookAt,
+    Live2dPhysics, OnLeave, ParticlePointer, PointerMode, Ramp, Scale, SceneOptions, Span,
+    Turbulence, VelocityRange,
 };
 use waywall_proto::project::WallpaperKind;
 
 use super::{
-    ChannelInput, EffectKind, EffectSpec, Follow, ImageLayer, Layer, Light, ParticleLayer,
-    SceneSpec, ShaderLayer, Texture,
+    Axis, ChannelInput, ClickRule, EffectKind, EffectSpec, Follow, Hit, ImageLayer, Layer, Light,
+    Live2dLayer, LookAt, ParticleLayer, SceneSpec, ShaderLayer, Texture,
 };
 use crate::assets::Assets;
 use crate::backend::shader::{CHANNEL_SECTION, channel_name, parse_inputs};
 use crate::config::{Layers, OutputConfig, merge};
 use crate::gpu::compile_wgsl;
 use crate::gpu::shadertoy::{self, Language, UniformLayout};
+use crate::live2d;
 use crate::properties::{self, PropValue, Property};
 use crate::wallpaper::Wallpaper;
 
@@ -40,6 +42,8 @@ const BLOOM_UP_SHADER: &str = "shaders/bloom/upsample.wgsl";
 const SIMULATE_SHADER: &str = "shaders/particles/simulate.wgsl";
 const PARTICLE_SHADER: &str = "shaders/particles/render.wgsl";
 const INPUT_SHADER: &str = "shaders/scene/input.wgsl";
+const LIVE2D_DRAW_SHADER: &str = "shaders/live2d/draw.wgsl";
+const LIVE2D_MASK_SHADER: &str = "shaders/live2d/mask.wgsl";
 const PROPERTY_SIGIL: char = '$';
 /// `scene.toml` 최상위 섹션.
 const TOP_KEYS: [&str; 4] = ["scene", "layer", "light", "post"];
@@ -51,17 +55,20 @@ const COMMON_SECTION: &str = "layer";
 const IMAGE: &str = "image";
 const PARTICLES: &str = "particles";
 const SHADER: &str = "shader";
+const LIVE2D: &str = "live2d";
 /// shader 레이어 입력: 이 레이어 아래에 지금까지 그려진 장면.
 const BELOW: &str = "below";
 /// 파티클 무늬를 정하는 레이어 필드.
 const LOOK_KEYS: [&str; 2] = ["texture", "sprite"];
 const SPRITE_KEY: &str = "sprite";
 /// 레이어 타입이 받지 않는 공통 필드: (타입, 필드).
-const UNSUPPORTED: [(&str, &str); 4] = [
+const UNSUPPORTED: [(&str, &str); 6] = [
     (PARTICLES, "clip"),
     (PARTICLES, "follow"),
     (PARTICLES, "effects"),
     (SHADER, "effects"),
+    (LIVE2D, "follow"),
+    (LIVE2D, "effects"),
 ];
 const FOLLOW_SECTION: &str = "follow";
 const EFFECTS_SECTION: &str = "effects";
@@ -116,6 +123,47 @@ struct ShaderLayerDef {
     clip: Option<String>,
     follow: Option<Table>,
 }
+
+/// live2d 레이어 (병합 후). 필드 설명은 docs/wallpaper-format.md#live2d.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Live2dLayerDef {
+    #[serde(rename = "type")]
+    _kind: String,
+    id: Option<String>,
+    blend: Blend,
+    opacity: f64,
+    parallax: f64,
+    visible: bool,
+    /// `.model3.json`.
+    model: String,
+    rect: Option<[f64; 4]>,
+    position: Option<[f64; 2]>,
+    scale: f64,
+    render_scale: f64,
+    clip: Option<String>,
+    idle: String,
+    fade: f64,
+    max_step: f64,
+    blink: Live2dBlink,
+    breath: Live2dBreath,
+    physics: Live2dPhysics,
+    pose_fade: f64,
+    look_at: Live2dLookAt,
+    on_click: Option<OnClickDef>,
+}
+
+/// live2d `on_click`: 모션 그룹 하나(모델 어디든) 또는 부위 → 모션 그룹.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OnClickDef {
+    Anywhere(String),
+    Parts(std::collections::BTreeMap<String, String>),
+}
+
+/// `on_click` 표에서 나머지 모델 위 클릭을 뜻하는 키, drawable을 직접 가리키는 접두사.
+const CLICK_ANYWHERE: &str = "*";
+const CLICK_DRAWABLE_PREFIX: &str = "drawable:";
 
 /// particles 레이어 (병합 후).
 #[derive(Debug, Deserialize)]
@@ -184,6 +232,7 @@ const POINTER: &str = "pointer";
 enum LayerDef {
     Image(Box<ImageLayerDef>),
     Shader(Box<ShaderLayerDef>),
+    Live2d(Box<Live2dLayerDef>),
     /// `bool`: `sprite`가 레이어 자신의 값(배경 디렉터리 기준)인지. 아니면 assets 기준.
     Particles(Box<ParticleLayerDef>, bool),
 }
@@ -193,6 +242,7 @@ impl LayerDef {
         match self {
             LayerDef::Image(d) => d.id.as_ref(),
             LayerDef::Shader(d) => d.id.as_ref(),
+            LayerDef::Live2d(d) => d.id.as_ref(),
             LayerDef::Particles(d, _) => d.id.as_ref(),
         }
     }
@@ -201,6 +251,7 @@ impl LayerDef {
         match self {
             LayerDef::Image(d) => d.visible,
             LayerDef::Shader(d) => d.visible,
+            LayerDef::Live2d(d) => d.visible,
             LayerDef::Particles(d, _) => d.visible,
         }
     }
@@ -208,7 +259,7 @@ impl LayerDef {
     fn texture(&self) -> Option<&String> {
         match self {
             LayerDef::Image(d) => Some(&d.texture),
-            LayerDef::Shader(_) => None,
+            LayerDef::Shader(_) | LayerDef::Live2d(_) => None,
             LayerDef::Particles(d, _) => d.texture.as_ref(),
         }
     }
@@ -217,6 +268,7 @@ impl LayerDef {
         match self {
             LayerDef::Image(d) => d.clip.as_ref(),
             LayerDef::Shader(d) => d.clip.as_ref(),
+            LayerDef::Live2d(d) => d.clip.as_ref(),
             LayerDef::Particles(..) => None,
         }
     }
@@ -385,6 +437,12 @@ pub fn load(
                 .with_context(|| format!("layer `{id}`"))?;
                 Layer::Particles(Box::new(particle_layer(id, *d, texture, shader, doc.size)))
             }
+            LayerDef::Live2d(d) => {
+                let clip = d.clip.as_ref().map(|c| new_index[&index[c]]);
+                let layer = live2d_layer(id.clone(), *d, clip, base, assets, doc.size)
+                    .with_context(|| format!("layer `{id}`"))?;
+                Layer::Live2d(Box::new(layer))
+            }
             LayerDef::Shader(d) => {
                 let path = base.join(&d.source);
                 let text = std::fs::read_to_string(&path)
@@ -496,6 +554,233 @@ pub fn load(
         effect_mask_shader,
     };
     Ok((spec, opts))
+}
+
+/// `.model3.json`이 가리키는 `.moc3`와 텍스처를 읽고, 모델을 한 번 만들어 형식을 검사한다.
+fn live2d_layer(
+    id: String,
+    d: Live2dLayerDef,
+    clip: Option<usize>,
+    base: &Path,
+    assets: &Assets,
+    design: [f64; 2],
+) -> Result<Live2dLayer> {
+    let path = base.join(&d.model);
+    let model3 = live2d::Model3::read(&path)?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let moc_path = dir.join(&model3.file_references.moc);
+    let moc = std::fs::read(&moc_path)
+        .with_context(|| format!("failed to read {}", moc_path.display()))?;
+    let model = live2d::Model::new(&moc).with_context(|| format!("{}", moc_path.display()))?;
+    let textures = model3
+        .file_references
+        .textures
+        .iter()
+        .map(|t| {
+            let file = dir.join(t);
+            decode(&file).with_context(|| format!("texture {}", file.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(bad) = model
+        .drawables()
+        .iter()
+        .find(|dr| dr.texture < 0 || dr.texture as usize >= textures.len())
+    {
+        bail!(
+            "{}: a drawable uses texture #{} but the model has {}",
+            path.display(),
+            bad.texture,
+            textures.len()
+        );
+    }
+    // 대기 모션. 그룹 이름이 없으면(모션이 하나도 없는 모델은 제외) 있는 그룹을 알려 준다.
+    let motions = &model3.file_references.motions;
+    let idle_refs = match motions.get(&d.idle) {
+        Some(m) => m.as_slice(),
+        None if motions.is_empty() => &[],
+        None => bail!(
+            "{}: no motion group `{}` for `idle` (groups: {})",
+            path.display(),
+            d.idle,
+            motions.keys().cloned().collect::<Vec<_>>().join(", ")
+        ),
+    };
+    let fallback = d.fade as f32;
+    let mut clips = Vec::new();
+    let mut load_group = |refs: &[live2d::MotionRef]| -> Result<Vec<usize>> {
+        refs.iter()
+            .map(|r| {
+                let file = dir.join(&r.file);
+                let motion = live2d::Motion::read(&file)?;
+                let pick = |entry: Option<f32>, own: Option<f32>| {
+                    entry.filter(|s| *s >= 0.0).or(own).unwrap_or(fallback)
+                };
+                clips.push(live2d::Clip {
+                    fade_in: pick(r.fade_in_time, motion.fade_in),
+                    fade_out: pick(r.fade_out_time, motion.fade_out),
+                    motion,
+                });
+                Ok(clips.len() - 1)
+            })
+            .collect()
+    };
+    let idle = load_group(idle_refs)?;
+    let group = |name: &str| {
+        motions.get(name).with_context(|| {
+            format!(
+                "on_click: no motion group `{name}` (groups: {})",
+                motions.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })
+    };
+    // on_click: 부위 규칙이 먼저, "*"(또는 문자열 하나)가 마지막.
+    let mut on_click = Vec::new();
+    let mut anywhere = None;
+    match &d.on_click {
+        None => {}
+        Some(OnClickDef::Anywhere(g)) => anywhere = Some(load_group(group(g)?)?),
+        Some(OnClickDef::Parts(map)) => {
+            for (key, g) in map {
+                let clips = load_group(group(g)?)?;
+                if key == CLICK_ANYWHERE {
+                    anywhere = Some(clips);
+                    continue;
+                }
+                let ids = if let Some(id) = key.strip_prefix(CLICK_DRAWABLE_PREFIX) {
+                    ensure!(
+                        model.drawable_ids.iter().any(|d| d == id),
+                        "on_click: no drawable `{id}`"
+                    );
+                    vec![id.to_owned()]
+                } else {
+                    let ids: Vec<String> = model3
+                        .hit_areas
+                        .iter()
+                        .filter(|h| &h.name == key)
+                        .map(|h| h.id.clone())
+                        .collect();
+                    ensure!(
+                        !ids.is_empty(),
+                        "on_click: no HitArea `{key}` (this model has: {}; use \"{CLICK_ANYWHERE}\" or \"{CLICK_DRAWABLE_PREFIX}<ID>\")",
+                        if model3.hit_areas.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            model3
+                                .hit_areas
+                                .iter()
+                                .map(|h| h.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    );
+                    ids
+                };
+                on_click.push(ClickRule {
+                    hit: Hit::Drawables(ids),
+                    clips,
+                });
+            }
+        }
+    }
+    if let Some(clips) = anywhere {
+        on_click.push(ClickRule {
+            hit: Hit::Anywhere,
+            clips,
+        });
+    }
+    ensure!(d.max_step > 0.0, "`max_step` must be positive");
+    let b = &d.blink;
+    ensure!(
+        b.interval[0] >= 0.0 && b.interval[1] >= b.interval[0],
+        "blink: `interval` must be [min, max] with 0 <= min <= max"
+    );
+    ensure!(
+        b.closing >= 0.0 && b.closed >= 0.0 && b.opening >= 0.0,
+        "blink: times must be >= 0"
+    );
+    if let Some((id, _)) = d.breath.params.iter().find(|(_, p)| p.cycle <= 0.0) {
+        bail!("breath: `{id}`.cycle must be positive");
+    }
+    ensure!(d.pose_fade >= 0.0, "`pose_fade` must be >= 0");
+    let refs = &model3.file_references;
+    let physics = match (&refs.physics, d.physics.enabled) {
+        (Some(f), true) => {
+            let file = live2d::PhysicsFile::read(&dir.join(f))?;
+            let v = |a: [f64; 2]| [a[0] as f32, a[1] as f32];
+            Some((file, v(d.physics.gravity), v(d.physics.wind)))
+        }
+        _ => None,
+    };
+    let pose = refs
+        .pose
+        .as_ref()
+        .map(|f| -> Result<_> {
+            let file = live2d::PoseFile::read(&dir.join(f))?;
+            let fade = file.fade().unwrap_or(d.pose_fade as f32);
+            Ok((file, fade))
+        })
+        .transpose()?;
+    let rect = d.rect.unwrap_or([0.0, 0.0, design[0], design[1]]);
+    let l = &d.look_at;
+    let look_at = if l.enabled {
+        ensure!(l.range > 0.0, "look_at: `range` must be positive");
+        ensure!(l.smoothing >= 0.0, "look_at: `smoothing` must be >= 0");
+        let params = l
+            .params
+            .iter()
+            .map(|(id, max)| {
+                let axis = match id.chars().last() {
+                    Some('X' | 'x') => Axis::X,
+                    Some('Y' | 'y') => Axis::Y,
+                    _ => bail!("look_at.params: `{id}` must end with X or Y"),
+                };
+                Ok((id.clone(), *max as f32, axis))
+            })
+            .collect::<Result<_>>()?;
+        Some(LookAt {
+            follow: Follow {
+                anchor: l
+                    .anchor
+                    .unwrap_or([rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0]),
+                max_offset: [1.0, 1.0],
+                range: l.range,
+                smoothing: l.smoothing,
+                on_leave: l.on_leave,
+            },
+            params,
+        })
+    } else {
+        None
+    };
+    Ok(Live2dLayer {
+        id,
+        blend: d.blend,
+        opacity: d.opacity,
+        parallax: d.parallax,
+        rect,
+        position: d.position.unwrap_or([rect[2] / 2.0, rect[3] / 2.0]),
+        scale: d.scale,
+        render_scale: d.render_scale,
+        clip,
+        moc,
+        textures,
+        clips,
+        idle,
+        eye_ids: model3.group(live2d::EYE_BLINK_GROUP),
+        blink: d.blink.enabled.then_some(d.blink.clone()),
+        breath: if d.breath.enabled {
+            d.breath.params.into_iter().collect()
+        } else {
+            Vec::new()
+        },
+        physics,
+        pose,
+        max_step: d.max_step,
+        look_at,
+        on_click,
+        draw_shader: compile_wgsl(LIVE2D_DRAW_SHADER, &asset_text(assets, LIVE2D_DRAW_SHADER)?)?,
+        mask_shader: compile_wgsl(LIVE2D_MASK_SHADER, &asset_text(assets, LIVE2D_MASK_SHADER)?)?,
+    })
 }
 
 fn particle_layer(
@@ -633,8 +918,9 @@ fn layer_def(
         IMAGE => Table::try_from(&opts.image)?,
         PARTICLES => Table::try_from(&opts.particles)?,
         SHADER => Table::try_from(&opts.shader)?,
+        LIVE2D => Table::try_from(&opts.live2d)?,
         _ => bail!(
-            "{}: unknown layer type `{kind}` (image | particles | shader)",
+            "{}: unknown layer type `{kind}` (image | particles | shader | live2d)",
             ctx()
         ),
     };
@@ -678,6 +964,27 @@ fn layer_def(
                 ctx()
             );
             return Ok(LayerDef::Shader(Box::new(d)));
+        }
+        LIVE2D => {
+            let d: Live2dLayerDef = t.try_into().with_context(ctx)?;
+            if let Some(r) = d.rect {
+                ensure!(
+                    r[2] > 0.0 && r[3] > 0.0,
+                    "{}: `rect` size must be positive",
+                    ctx()
+                );
+            }
+            ensure!(
+                d.render_scale > 0.0 && d.render_scale.is_finite(),
+                "{}: `render_scale` must be positive",
+                ctx()
+            );
+            ensure!(
+                d.scale > 0.0 && d.scale.is_finite(),
+                "{}: `scale` must be positive",
+                ctx()
+            );
+            return Ok(LayerDef::Live2d(Box::new(d)));
         }
         _ => {}
     }

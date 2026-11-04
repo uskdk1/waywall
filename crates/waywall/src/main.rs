@@ -7,6 +7,7 @@ mod daemon;
 mod fit;
 mod gpu;
 mod ipc;
+mod live2d;
 mod properties;
 mod runtime;
 mod visibility;

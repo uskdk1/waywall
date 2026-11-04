@@ -8,6 +8,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-utils.url = "github:numtide/flake-utils";
+    # Live2D 런타임: Cubism Core 호환 오픈소스 재구현 (MIT). build.rs가 C 소스를 컴파일해 정적 링크 (docs/development.md#live2d-purismcore-m9)
+    purism-core = {
+      url = "github:SakuraMotion/PurismCore/v1.1.0";
+      flake = false;
+    };
   };
 
   outputs =
@@ -16,6 +21,7 @@
       nixpkgs,
       rust-overlay,
       flake-utils,
+      purism-core,
     }:
     flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
       system:
@@ -80,6 +86,7 @@
           version = (lib.importTOML ./Cargo.toml).workspace.package.version;
           inherit src nativeBuildInputs buildInputs;
           cargoLock.lockFile = ./Cargo.lock;
+          env.PURISM_CORE_SRC = "${purism-core}";
         };
 
         waywall = rustPlatform.buildRustPackage (
@@ -87,6 +94,10 @@
           // {
             # 데몬은 GTK를 쓰지 않으므로 GApps 래핑은 헬퍼에만 (docs/development.md#런타임-경로)
             dontWrapGApps = true;
+            # PurismCore(MIT)를 데몬에 정적 링크하므로 라이선스 문구를 함께 배포한다.
+            postInstall = ''
+              install -Dm644 ${purism-core}/LICENSE $out/share/licenses/waywall/PurismCore.LICENSE
+            '';
             postFixup = ''
               wrapProgram $out/bin/waywall \
                 --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs} \
@@ -147,6 +158,7 @@
           ]);
           LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
           GST_PLUGIN_SYSTEM_PATH_1_0 = gstPluginPath;
+          PURISM_CORE_SRC = "${purism-core}";
           # 웹 헬퍼를 cargo run으로 돌릴 때: GTK 스키마, https(GIO 모듈)
           XDG_DATA_DIRS = "${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}";
           GIO_EXTRA_MODULES = "${pkgs.glib-networking}/lib/gio/modules";

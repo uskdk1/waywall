@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 mod bloom;
 mod effects;
+mod live2d_layer;
 mod load;
 mod particles;
 mod render;
@@ -16,8 +17,8 @@ pub use load::load;
 pub use render::{SceneRenderer, upload_texture};
 use waywall_proto::Color;
 use waywall_proto::config::{
-    Blend, Bloom, ChannelDefaults, EmitterShape, Fit, OnLeave, ParticlePointer, Turbulence,
-    VelocityRange,
+    Blend, Bloom, ChannelDefaults, EmitterShape, Fit, Live2dBlink, Live2dBreathParam, OnLeave,
+    ParticlePointer, Turbulence, VelocityRange,
 };
 
 use crate::gpu::shadertoy::{Compiled, Language, UniformLayout};
@@ -54,6 +55,7 @@ pub enum Layer {
     Image(Box<ImageLayer>),
     Particles(Box<ParticleLayer>),
     Shader(Box<ShaderLayer>),
+    Live2d(Box<Live2dLayer>),
 }
 
 impl Layer {
@@ -62,6 +64,7 @@ impl Layer {
             Layer::Image(l) => &l.id,
             Layer::Particles(l) => &l.id,
             Layer::Shader(l) => &l.id,
+            Layer::Live2d(l) => &l.id,
         }
     }
 
@@ -69,7 +72,7 @@ impl Layer {
         match self {
             Layer::Image(l) => Some(&l.texture),
             Layer::Particles(l) => l.texture.as_ref(),
-            Layer::Shader(_) => None,
+            Layer::Shader(_) | Layer::Live2d(_) => None,
         }
     }
 }
@@ -144,6 +147,75 @@ pub struct ShaderLayer {
     pub follow: Option<Follow>,
     /// HDR 버퍼에 직접 그린다: `opacity = 1`, `render_scale = 1`이고 다른 레이어의 입력이 아님 (docs/architecture.md#씬-렌더러).
     pub direct: bool,
+}
+
+/// 필드 설명은 docs/wallpaper-format.md#live2d.
+pub struct Live2dLayer {
+    pub id: String,
+    pub blend: Blend,
+    pub opacity: f64,
+    pub parallax: f64,
+    /// `[x, y, 폭, 높이]` (설계 px).
+    pub rect: [f64; 4],
+    /// 모델 캔버스 중심의 위치 (rect 안, 설계 px).
+    pub position: [f64; 2],
+    /// 캔버스 px → 설계 px.
+    pub scale: f64,
+    pub render_scale: f64,
+    pub clip: Option<usize>,
+    /// `.moc3` 내용 (출력마다 모델 인스턴스를 만든다).
+    pub moc: Vec<u8>,
+    /// `model3.json` 순서의 텍스처.
+    pub textures: Vec<Texture>,
+    /// 읽어 둔 모션, `idle`은 그중 대기 모션 번호.
+    pub clips: Vec<crate::live2d::Clip>,
+    pub idle: Vec<usize>,
+    /// 눈 깜빡임 파라미터 (`model3.json` Groups `EyeBlink`).
+    pub eye_ids: Vec<String>,
+    /// 꺼져 있으면 `None`.
+    pub blink: Option<Live2dBlink>,
+    /// 꺼져 있으면 비어 있음.
+    pub breath: Vec<(String, Live2dBreathParam)>,
+    /// 꺼져 있거나 모델에 없으면 `None`. (파일, 중력, 바람)
+    pub physics: Option<(crate::live2d::PhysicsFile, [f32; 2], [f32; 2])>,
+    /// 모델에 없으면 `None`. (파일, 페이드 초)
+    pub pose: Option<(crate::live2d::PoseFile, f32)>,
+    pub max_step: f64,
+    /// 꺼져 있으면 `None`.
+    pub look_at: Option<LookAt>,
+    /// 부위 규칙이 먼저, `Anywhere`가 마지막.
+    pub on_click: Vec<ClickRule>,
+    /// `live2d/draw.wgsl`, `live2d/mask.wgsl`.
+    pub draw_shader: naga::Module,
+    pub mask_shader: naga::Module,
+}
+
+/// live2d `look_at`: 방향 계산은 `follow`(최대 이동 `[1, 1]`)와 같고, 파라미터에 성분 × 최대값을 더한다.
+pub struct LookAt {
+    pub follow: Follow,
+    /// (파라미터 ID, 최대값, 성분)
+    pub params: Vec<(String, f32, Axis)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// 오른쪽 +.
+    X,
+    /// 위 +.
+    Y,
+}
+
+/// live2d `on_click` 규칙 하나: 맞으면 `clips` 중 하나를 재생.
+pub struct ClickRule {
+    pub hit: Hit,
+    pub clips: Vec<usize>,
+}
+
+pub enum Hit {
+    /// 이 drawable 중 하나의 메시 안 (HitArea·`drawable:<ID>`). 불투명도와 관계없음.
+    Drawables(Vec<String>),
+    /// 보이는 메시 어디든.
+    Anywhere,
 }
 
 /// docs/wallpaper-format.md#포인터-따라가기-follow. 좌표는 설계 px.

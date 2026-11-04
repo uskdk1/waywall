@@ -7,6 +7,7 @@ use waywall_proto::config::{Blend, Fit, HdrFormat, Render};
 
 use super::bloom::{BloomChain, BloomPipelines};
 use super::effects::{EffectShared, GpuEffects};
+use super::live2d_layer::GpuLive2dLayer;
 use super::particles::{self, GpuParticles};
 use super::shader_layer::{Cropper, GpuShaderLayer, Sources, Target};
 use super::{Follow, ImageLayer, Layer, Light, SceneSpec, Texture};
@@ -76,6 +77,7 @@ enum DrawLayer {
     Image(Box<GpuLayer>),
     Particles(Box<GpuParticles>),
     Shader(Box<GpuShaderLayer>),
+    Live2d(Box<GpuLive2dLayer>),
 }
 
 impl DrawLayer {
@@ -84,6 +86,7 @@ impl DrawLayer {
             DrawLayer::Image(l) => l.parallax,
             DrawLayer::Particles(p) => p.parallax(),
             DrawLayer::Shader(s) => s.parallax(),
+            DrawLayer::Live2d(l) => l.parallax(),
         }
     }
 }
@@ -123,6 +126,15 @@ pub(super) struct FollowState {
 }
 
 impl FollowState {
+    /// 지금 이동량 (`spec.max_offset` 단위).
+    pub(super) fn shift(&self) -> [f64; 2] {
+        self.smooth.shift
+    }
+
+    pub(super) fn spec_range(&self) -> f64 {
+        self.spec.range
+    }
+
     pub(super) fn new(spec: Follow) -> Self {
         Self {
             spec,
@@ -132,7 +144,13 @@ impl FollowState {
     }
 
     /// `pointer`: 설계 px (배경 밖이면 `None`), `shift`: 이 레이어의 패럴랙스 이동. 아직 움직이면 `true`.
-    fn step(&mut self, pointer: Option<[f64; 2]>, shift: [f64; 2], dt: f64, settle: f64) -> bool {
+    pub(super) fn step(
+        &mut self,
+        pointer: Option<[f64; 2]>,
+        shift: [f64; 2],
+        dt: f64,
+        settle: f64,
+    ) -> bool {
         let s = &self.spec;
         self.goal = match pointer {
             Some(p) => {
@@ -209,6 +227,7 @@ impl SceneRenderer {
         let clipped = spec.layers.iter().any(|l| match l {
             Layer::Image(i) => i.clip.is_some(),
             Layer::Shader(s) => s.clip.is_some(),
+            Layer::Live2d(l) => l.clip.is_some(),
             Layer::Particles(_) => false,
         });
         ensure!(
@@ -342,6 +361,7 @@ impl SceneRenderer {
                         .any(|l| match l {
                             Layer::Image(i) => i.blend == b,
                             Layer::Shader(s) => s.blend == b,
+                            Layer::Live2d(l) => l.blend == b,
                             Layer::Particles(_) => false,
                         })
                         .then(|| {
@@ -436,6 +456,9 @@ impl SceneRenderer {
                             Layer::Shader(s) => DrawLayer::Shader(Box::new(GpuShaderLayer::new(
                                 gpu, d, s, hdr_format,
                             )?)),
+                            Layer::Live2d(l) => {
+                                DrawLayer::Live2d(Box::new(GpuLive2dLayer::new(gpu, d, *l)?))
+                            }
                         })
                     })
                     .collect();
@@ -565,6 +588,7 @@ impl SceneRenderer {
             .filter_map(|l| match l {
                 DrawLayer::Image(l) => l.clip,
                 DrawLayer::Shader(s) => s.quad.clip,
+                DrawLayer::Live2d(l) => l.quad.clip,
                 DrawLayer::Particles(_) => None,
             })
             .collect();
@@ -608,6 +632,10 @@ impl SceneRenderer {
             for l in &mut self.layers {
                 match l {
                     DrawLayer::Shader(s) => s.resize(gpu, map, &bindings, &sources),
+                    DrawLayer::Live2d(l) => {
+                        let clip = l.quad.clip.and_then(|j| sources.isolated.get(&j));
+                        l.resize(d, map, &bindings, clip.map(|t| &t.view));
+                    }
                     DrawLayer::Image(l) => {
                         if let Some(j) = l.clip {
                             let clip = sources.isolated.get(&j).map(|t| &t.view);
@@ -627,6 +655,7 @@ impl SceneRenderer {
             || self.layers.iter().any(|l| match l {
                 DrawLayer::Image(l) => l.follow.is_some(),
                 DrawLayer::Shader(s) => s.quad.follow.is_some(),
+                DrawLayer::Live2d(l) => l.follows_pointer(),
                 DrawLayer::Particles(_) => false,
             })
             || (self.lit
@@ -642,9 +671,11 @@ impl SceneRenderer {
 
     /// 왼쪽 클릭에 반응하는지 (파티클 `burst`).
     pub fn wants_clicks(&self) -> bool {
-        self.layers
-            .iter()
-            .any(|l| matches!(l, DrawLayer::Particles(p) if p.wants_clicks()))
+        self.layers.iter().any(|l| match l {
+            DrawLayer::Particles(p) => p.wants_clicks(),
+            DrawLayer::Live2d(l) => l.wants_clicks(),
+            _ => false,
+        })
     }
 
     pub fn resize(&mut self, gpu: &Gpu, size: (u32, u32)) -> Result<()> {
@@ -736,6 +767,15 @@ impl SceneRenderer {
                     // 셰이더는 시간에 따라 변한다.
                     moving = true;
                 }
+                DrawLayer::Live2d(l) => {
+                    l.quad.write_uniform(gpu, &map, shift);
+                    // iMouse.zw의 절댓값 = 마지막 왼쪽 클릭 위치 (렌더 px, 왼쪽 아래 원점).
+                    let click = map.to_design([
+                        f64::from(p.mouse[2].abs()),
+                        f64::from(f.size.1) - f64::from(p.mouse[3].abs()),
+                    ]);
+                    moving |= l.update(dt as f32, pointer, shift, settle, p.presses, click);
+                }
                 DrawLayer::Particles(p) => moving |= p.update(gpu, map, shift, f),
             }
         }
@@ -758,6 +798,12 @@ impl SceneRenderer {
                 && let Some(e) = &l.effects
             {
                 e.render(gpu, encoder, &self.effects, Some(&self.cropper), f);
+            }
+        }
+        // live2d: 모델을 자기 텍스처에 (바뀌었을 때만).
+        for l in &mut self.layers {
+            if let DrawLayer::Live2d(l) = l {
+                l.render(gpu, encoder);
             }
         }
         // clip 대상을 단독으로. 아래 레이어부터라 clip 대상이 clip을 가져도 이미 준비되어 있다.
@@ -1246,6 +1292,7 @@ fn draw_layers<'a>(
         match l {
             DrawLayer::Image(l) => draw_quad(&mut pass, pipelines, l),
             DrawLayer::Shader(s) => draw_quad(&mut pass, pipelines, &s.quad),
+            DrawLayer::Live2d(l) => draw_quad(&mut pass, pipelines, &l.quad),
             DrawLayer::Particles(p) => p.draw(&mut pass),
         }
     }

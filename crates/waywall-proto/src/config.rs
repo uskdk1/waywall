@@ -249,6 +249,7 @@ pub struct SceneOptions {
     pub layer: SceneLayerDefaults,
     pub image: SceneImageDefaults,
     pub shader: SceneShaderDefaults,
+    pub live2d: SceneLive2dDefaults,
     pub particles: SceneParticleDefaults,
     pub light: SceneLightDefaults,
     /// 효과 타입마다 생략한 필드 (`[types.scene.effects.<타입>]`). 효과 파일을 새로 둘 수 있어 표 그대로.
@@ -310,6 +311,82 @@ pub struct SceneImageDefaults {
 pub struct SceneShaderDefaults {
     pub channel: ChannelDefaults,
     pub render_scale: f64,
+}
+
+/// live2d 레이어 필드 (docs/wallpaper-format.md#live2d).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SceneLive2dDefaults {
+    /// 캔버스 px → 설계 px 배율.
+    pub scale: f64,
+    pub render_scale: f64,
+    /// 대기 모션 그룹 (`model3.json` Motions의 이름).
+    pub idle: String,
+    /// 모션 파일·`model3.json`이 정하지 않았을 때의 페이드 시간(초).
+    pub fade: f64,
+    /// 한 프레임 모션 진행의 최대 dt(초).
+    pub max_step: f64,
+    pub blink: Live2dBlink,
+    pub breath: Live2dBreath,
+    pub physics: Live2dPhysics,
+    /// `pose3.json`이 정하지 않았을 때 파츠가 바뀌며 페이드하는 시간(초).
+    pub pose_fade: f64,
+    pub look_at: Live2dLookAt,
+}
+
+/// 포인터 쪽을 보기. 방향은 `follow`와 같이 `normalize(포인터 − anchor) × min(1, 거리 / range)`이고,
+/// 파라미터마다 그 x(오른쪽 +)·y(위 +) 성분 × 최대값을 더한다(`…X` 이름은 x, `…Y` 이름은 y).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Live2dLookAt {
+    pub enabled: bool,
+    /// 기준점 (설계 px). 생략하면 레이어 `rect`의 중심.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<[f64; 2]>,
+    pub range: f64,
+    pub smoothing: f64,
+    pub on_leave: OnLeave,
+    pub params: std::collections::BTreeMap<String, f64>,
+}
+
+/// `physics3.json` 물리. 좌표는 사슬 기준(y 위로 +).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Live2dPhysics {
+    pub enabled: bool,
+    pub gravity: [f64; 2],
+    pub wind: [f64; 2],
+}
+
+/// 자동 눈 깜빡임: `model3.json` Groups의 `EyeBlink` 파라미터에 0(감음)–1(뜸)을 곱한다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Live2dBlink {
+    pub enabled: bool,
+    /// 깜빡임 사이 간격 `[최소, 최대]` 초 (무작위).
+    pub interval: [f64; 2],
+    /// 감기·감은 채·뜨기에 걸리는 시간(초).
+    pub closing: f64,
+    pub closed: f64,
+    pub opening: f64,
+}
+
+/// 숨쉬기: 파라미터마다 `(offset + peak × sin(2π t / cycle)) × weight`를 더한다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Live2dBreath {
+    pub enabled: bool,
+    pub params: std::collections::BTreeMap<String, Live2dBreathParam>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Live2dBreathParam {
+    pub offset: f64,
+    pub peak: f64,
+    /// 주기(초).
+    pub cycle: f64,
+    pub weight: f64,
 }
 
 /// 숫자 하나(가로세로 같음) 또는 `[x, y]`.

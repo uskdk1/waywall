@@ -34,10 +34,28 @@
         "type": "github"
       }
     },
+    "purism-core": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1787351671,
+        "narHash": "sha256-z1ZQayCmJoniGUI8AgUGsLkFh13VruXQGP55Ytc3E5o=",
+        "owner": "SakuraMotion",
+        "repo": "PurismCore",
+        "rev": "1069334965522df5d0b791e97f01e26b19c45456",
+        "type": "github"
+      },
+      "original": {
+        "owner": "SakuraMotion",
+        "ref": "v1.1.0",
+        "repo": "PurismCore",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
+        "purism-core": "purism-core",
         "rust-overlay": "rust-overlay"
       }
     },
