@@ -1743,6 +1743,41 @@ mod tests {
         assert!(n >= 1);
     }
 
+    /// Live2D 예제는 모델을 담지 않는다(사용자가 `model/`에 넣음, examples/README.md#live2d-live2d).
+    /// 모델이 없으면 그 모델 파일을 못 읽는다는 오류만 나야 하고(다른 설정은 모두 맞음), 있으면 끝까지 읽힌다.
+    #[test]
+    fn live2d_examples_need_only_the_model() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/live2d");
+        let l = Layers::load_for_test("");
+        let detect = l.global().unwrap().detect;
+        let assets = Assets::new(std::path::PathBuf::from("/nonexistent"));
+        let mut n = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let wp =
+                crate::wallpaper::resolve(path.to_str().unwrap(), &detect, Path::new("/")).unwrap();
+            let crate::wallpaper::Source::File(scene) = &wp.source else {
+                panic!("{}", path.display());
+            };
+            let loaded = load(scene, &wp, &l, &l.output("X").unwrap(), &assets);
+            if path.join("model").exists() {
+                let (spec, _) = loaded.unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+                assert!(spec.layers.iter().any(|l| matches!(l, Layer::Live2d(_))));
+            } else {
+                let e = format!("{:#}", loaded.err().expect("loads without its model"));
+                assert!(
+                    e.contains("failed to read")
+                        && e.contains("model/")
+                        && e.contains(".model3.json"),
+                    "{}: {e}",
+                    path.display()
+                );
+            }
+            n += 1;
+        }
+        assert!(n >= 2);
+    }
+
     #[test]
     fn builtin_shaders_compile() {
         let assets = Assets::new(std::path::PathBuf::from("/nonexistent"));

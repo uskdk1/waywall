@@ -1,3 +1,6 @@
 /target
 /result*
 .direnv/
+
+# Live2D 예제의 모델 (사용자가 직접 받아 넣음, examples/README.md#live2d-live2d)
+/examples/live2d/*/model

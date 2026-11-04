@@ -1,0 +1,57 @@
+# 미쿠 Live2D 예제. 모델은 들어 있지 않다: Live2D 공식 샘플 "初音ミク" PRO판의 runtime 폴더 내용을 model/에 넣는다.
+# 미쿠는 커서를 따라보고, 클릭하면 Tap 모션을 재생한다. 반짝이는 커서 쪽으로 모이고 클릭하면 터진다.
+
+[scene]
+width  = 1920
+height = 1080
+fit    = "cover"
+clear  = "#1b2b4f"
+
+[[layer]]
+type     = "image"
+id       = "sky"
+texture  = "textures/sky.png"     # 480×270
+scale    = 4.1
+parallax = 0.01
+
+[[layer]]
+type       = "particles"
+id         = "back_sparkles"
+max        = 2000
+emitter    = { shape = "box", position = [960, 600], size = [1920, 1100], rate = "$sparkles" }
+lifetime   = [3.0, 7.0]
+velocity   = { min = [-10, -25], max = [10, -5] }
+turbulence = { strength = 15, scale = 0.004, speed = 0.3 }
+size       = { start = 5, end = 2 }
+color      = { start = "#9ff5ee", end = "#ff8fd800" }
+emissive   = 2.5
+parallax   = 0.02
+
+[[layer]]
+type   = "live2d"
+id     = "miku"
+model  = "model/miku_sample_t04.model3.json"   # Live2D 샘플 "初音ミク" PRO판의 runtime 폴더 (examples/README.md#live2d-live2d)
+rect   = [560, 30, 800, 1050]
+scale  = 0.85
+look_at  = { anchor = [960, 250], range = 700 }
+on_click = "Tap"
+
+[[layer]]
+type     = "particles"
+id       = "front_sparkles"
+max      = 3000
+emitter  = { shape = "box", position = [960, 700], size = [1920, 800], rate = 15, burst = 120 }
+lifetime = [1.5, 4.0]
+velocity = { min = [-30, -60], max = [30, 10] }
+drag     = 0.8
+turbulence = { strength = 20, scale = 0.005, speed = 0.4 }
+size     = { start = 7, end = 1 }
+color    = { start = "#ffffff", end = "#39c5bb00" }
+emissive = 3.5
+pointer  = { mode = "attract", radius = 260, strength = 200 }
+parallax = 0.04
+
+[post]
+tonemap = "none"           # 그림 색 그대로
+bloom   = { threshold = 1.0, intensity = 0.6, radius = 5 }
+vignette = 0.25

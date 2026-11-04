@@ -1,0 +1,66 @@
+# 히요리 Live2D 예제. 모델은 들어 있지 않다: Live2D 공식 샘플 "모모세 히요리" PRO판의 runtime 폴더 내용을 model/에 넣는다.
+# 히요리는 커서를 따라보고, 몸을 클릭하면 Tap@Body, 그 밖을 클릭하면 Tap 모션. 햇살 속 먼지는 커서 쪽으로 모인다.
+
+[scene]
+width  = 1920
+height = 1080
+fit    = "cover"
+clear  = "#d8c0a0"
+
+[[layer]]
+type     = "image"
+id       = "room"
+texture  = "textures/room.png"    # 960×690
+position = [960, 600]
+scale    = 2.04
+parallax = 0.008
+
+[[layer]]
+type   = "shader"
+id     = "rays"
+source = "rays.glsl"
+inputs = { iChannel0 = "below" }
+blend  = "add"
+render_scale = 0.5                # 빛줄기는 부드러워서 절반 해상도로 충분
+
+[[layer]]
+type       = "particles"
+id         = "dust_back"
+max        = 1500
+emitter    = { shape = "box", position = [700, 500], size = [1400, 900], rate = "$dust" }
+lifetime   = [4.0, 9.0]
+velocity   = { min = [-6, -8], max = [6, 4] }
+turbulence = { strength = 10, scale = 0.003, speed = 0.2 }
+size       = { start = 3, end = 2 }
+color      = { start = "#fff1d6", end = "#ffd9a000" }
+emissive   = 1.8
+parallax   = 0.015
+
+[[layer]]
+type     = "live2d"
+id       = "hiyori"
+model    = "model/hiyori_pro_t11.model3.json"   # examples/README.md#live2d-live2d
+rect     = [620, 20, 700, 1060]
+scale    = 0.245                  # 캔버스 4175 px → 약 1020 설계 px
+look_at  = { anchor = [970, 230], range = 700 }
+on_click = { Body = "Tap@Body", "*" = "Tap" }
+
+[[layer]]
+type       = "particles"
+id         = "dust_front"
+max        = 2000
+emitter    = { shape = "box", position = [960, 600], size = [1920, 1000], rate = 8, burst = 80 }
+lifetime   = [2.0, 5.0]
+velocity   = { min = [-15, -25], max = [15, 5] }
+drag       = 0.8
+turbulence = { strength = 15, scale = 0.004, speed = 0.3 }
+size       = { start = 5, end = 1 }
+color      = { start = "#ffffff", end = "#ffcf8a00" }
+emissive   = 2.5
+pointer    = { mode = "attract", radius = 240, strength = 160 }
+parallax   = 0.03
+
+[post]
+tonemap  = "none"                 # 그림 색 그대로
+bloom    = { threshold = 1.0, intensity = 0.5, radius = 5 }
+vignette = 0.2

@@ -1,0 +1,13 @@
+[wallpaper]
+name  = "Miku Live2D"
+type  = "scene"
+entry = "scene.toml"
+
+[options]
+interactive = true
+
+[properties.sparkles]
+type    = "float"
+default = 40.0
+min     = 0.0
+max     = 300.0

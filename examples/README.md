@@ -28,6 +28,26 @@ waywall set --save examples/scenes/character     # 설정 파일에도 기록
 | `character/` | 레이어 효과 `sway`(머리카락만 흔들림), `clip` + `follow`(흰자 안에서 커서를 따라보는 눈), 빛줄기 | `strength`, `sun` |
 | `stained-glass/` | 4개를 넘는 채널(`iChannel0`–`iChannel5`), 빛 가리기(광원과 가리는 레이어를 따로 입력): 해 앞 창틀 막대의 그림자 줄, 색유리를 지난 빨간·파란 빛기둥 | `strength`, `sun` |
 
+## Live2D (`live2d/`)
+
+**모델은 들어 있지 않습니다.** 배경 설정(`scene.toml`·`project.toml`)과 직접 그린 텍스처만 있고, Live2D 모델은 사용자가
+[Live2D 샘플 데이터](https://www.live2d.com/ko/download/sample-data/) 페이지에서 이용 조건에 동의하고 받아 넣습니다.
+받은 샘플의 `runtime` 폴더 **안의 내용**을 각 예제의 `model/`에 넣으면 됩니다(복사나 심볼릭 링크). `model/`은 git에 올라가지 않습니다.
+
+| 예제 | 넣을 모델 (`model/`) | 보여 주는 것 | 속성 |
+|---|---|---|---|
+| `miku/` | "初音ミク" PRO판의 `runtime` (`miku_sample_t04.model3.json`이 바로 보이게) | 대기 모션·눈 깜빡임·숨쉬기·물리, 커서를 따라보기, 클릭하면 `Tap` 모션, 뒤·앞 반짝이(커서로 모이고 클릭하면 터짐), 블룸 | `sparkles` |
+| `hiyori/` | "모모세 히요리" PRO판(영상용 아님)의 `runtime` (`hiyori_pro_t11.model3.json`) | 포즈(팔 두 세트 전환), HitArea 클릭(`Body` → `Tap@Body`, 나머지 → `Tap`), 창 빛줄기(`"below"` 입력), 햇살 속 먼지 | `rays`, `sun`, `dust` |
+
+```sh
+cp -r ~/Downloads/miku/runtime/. examples/live2d/miku/model/     # 받은 위치에 맞게
+waywall set examples/live2d/miku
+```
+
+모델이 없으면 `set`이 `failed to read …/model/….model3.json`으로 거절합니다. 다른 모델을 쓰려면 `scene.toml`의 `model`·`scale`·`rect`와
+`look_at.params`(파라미터 이름은 모델마다 다름), `on_click`(모션 그룹·HitArea 이름)을 그 모델에 맞게 고칩니다
+([docs/wallpaper-format.md](../docs/wallpaper-format.md#live2d)).
+
 ## 웹 (`web/`)
 
 | 예제 | 보여 주는 것 | 속성 |

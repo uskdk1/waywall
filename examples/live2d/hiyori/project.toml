@@ -1,0 +1,23 @@
+[wallpaper]
+name  = "Hiyori Live2D"
+type  = "scene"
+entry = "scene.toml"
+
+[options]
+interactive = true
+
+[properties.rays]
+type    = "float"
+default = 1.2
+min     = 0.0
+max     = 4.0
+
+[properties.sun]
+type    = "color"
+default = "#ffe2b8"
+
+[properties.dust]
+type    = "float"
+default = 25.0
+min     = 0.0
+max     = 200.0

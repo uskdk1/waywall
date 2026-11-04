@@ -213,7 +213,7 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 배포할 수 없다. 그래서 백엔드를 먼저 정한다.
 
 검증 모델: 사용자가 가진 Live2D 공식 샘플 "初音ミク" FREE판·PRO판(`~/miku_ja`, PRO판은 스키닝·애니메이션 베이크 포함).
-둘 다 HitArea가 없다(`"HitAreas": []`). 샘플 이용 조건을 확인하기 전에는 저장소 `examples/`에 넣지 않는다.
+둘 다 HitArea가 없다(`"HitAreas": []`). 모델 파일은 저장소에 넣지 않고, 예제(`examples/live2d/`)는 배경 설정과 직접 그린 텍스처만 담아 사용자가 받은 모델을 `model/`에 넣게 한다.
 
 - M9a: ~~**mocari 검증**~~ — **취소.** 순수 Rust `.moc3` 런타임 mocari는 기술적으로는 동작했으나(아래 결과),
   제작자가 행방불명되어(GitHub 계정·저장소 `Eatgrapes/Mocari`가 사라짐, 2026-07 이후 릴리스 없음) 유지될 수 없다고 보고 백엔드 후보에서 뺐다.
@@ -277,6 +277,8 @@ PurismCore(정적 링크, 직접 쓴 최소 FFI)로 메시를 만들고 같은 �
   `"*"`는 부위 규칙이 하나도 맞지 않을 때). 단위 테스트까지 확인, 실제 포인터로는 사용자 확인 대기
 - 성능: 테스트 씬(모델 2 + 두 출력 58/104 fps)에서 데몬 CPU 약 39% → 프레임마다의 할당을 재사용 버퍼로 바꾼 뒤, 사용자 배경(미쿠 1 + 파티클 2 + 블룸, 두 출력 59/117 fps) 약 17%
 - 사용자 배경 `~/waywall-wallpapers/miku/`(저장소 밖): 그라데이션 하늘 + 뒤·앞 반짝이 + 미쿠 PRO(시선, 클릭하면 Tap 모션) + 블룸
+- 예제 `examples/live2d/miku`·`examples/live2d/hiyori`: 설정·직접 그린 텍스처만(히요리 배경은 샘플의 교실 그림 대신 ImageMagick 방), 모델은 `model/`(git 제외).
+  테스트 `live2d_examples_need_only_the_model`: 모델이 없으면 모델 파일을 못 읽는다는 오류만, 있으면 끝까지 읽힘
 - 단위 테스트 71개(+모션 세그먼트·페이드·비제한 베지어, 애니메이터 크로스페이드·깜빡임·잠들기, 물리 흔들림·정착·없는 파라미터, 포즈 전환,
   캔버스 → rect 변환, 삼각형 판정, 깨진 `.moc3` 거절)
 - **아직 없는 것:** 표정(Expressions)·고정 파라미터 값(`parameters`)·립싱크, Cubism 5.3 확장 블렌드·오프스크린, 가산·곱하기 블렌드 drawable 실제 모델 확인
