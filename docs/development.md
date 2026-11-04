@@ -117,6 +117,17 @@ Nix로 빌드한 프로그램은 시스템의 Vulkan ICD/VA-API 드라이버(`/u
 - 배포 라이선스: 개인·소규모 사업자(연 매출 1천만 엔 미만)는 면제지만 "확장 가능한 앱"은 예외입니다. waywall이 여기에 해당하는지는
   열린 질문입니다([roadmap.md](roadmap.md#m9--live2d-레이어-설계)).
 
+## Spine 런타임 (설계, M11)
+
+[M11](roadmap.md#m11--spine-레이어-설계)의 방침입니다.
+
+- `spine-c`(4.2)는 GitHub에 소스가 공개되어 있으므로 flake 입력(커밋 고정)으로 받아 Nix에서 빌드합니다. Cubism Core와 달리
+  사용자가 따로 받을 파일이 없습니다.
+- 라이선스는 Spine Runtimes License(소스 공개, 오픈소스 아님)입니다. 런타임을 제품에 넣는 시점에 넣는 사람이 유효한 Spine Editor
+  라이선스를 가져야 하고(체험판 불가), 배포물에 Spine Runtimes License를 함께 넣어야 합니다.
+- 그래서 cargo feature `spine`으로 분리합니다. 기본 패키지에 넣을지, `packages.waywall-full`처럼 별도 패키지로 둘지는 M11에서 정합니다.
+  feature가 꺼진 빌드는 `nix build`·`nix flake check`가 Spine 소스 없이 통과해야 합니다.
+
 ## 툴체인/의존성 업데이트
 
 ```sh

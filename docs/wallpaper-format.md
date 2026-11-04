@@ -507,7 +507,7 @@ HDR 장면 ─▶ + 블룸 × intensity ─▶ × exposure ─▶ tonemap ─▶
 
 ### 구현 상태
 
-이 문서의 씬 기능은 [캐릭터 레이어](#캐릭터-레이어-live2d--vrm-설계)(설계 단계)를 빼고 모두 동작합니다. 레이어 타입이 지원하지 않는 필드(예: particles의 `clip`)를 쓰면
+이 문서의 씬 기능은 [캐릭터 레이어](#캐릭터-레이어-live2d--vrm--spine-설계)(설계 단계)를 빼고 모두 동작합니다. 레이어 타입이 지원하지 않는 필드(예: particles의 `clip`)를 쓰면
 배경이 거절되고 `set` 응답과 `list`에 이유가 표시됩니다.
 
 ### 레이어 효과 (`effects`)
@@ -619,12 +619,13 @@ inputs = { iChannel0 = "below" }
 blend = "screen"
 ```
 
-### 캐릭터 레이어 (live2d · vrm, 설계)
+### 캐릭터 레이어 (live2d · vrm · spine, 설계)
 
-> **설계 단계, 아직 구현되지 않음.** 쓰면 이유와 함께 거절됩니다. 계획은 [roadmap.md](roadmap.md#m9--live2d-레이어-설계)의 M9(Live2D)·M10(VRM).
+> **설계 단계, 아직 구현되지 않음.** 쓰면 이유와 함께 거절됩니다. 계획은 [roadmap.md](roadmap.md#m9--live2d-레이어-설계)의 M9(Live2D)·M10(VRM)·M11(Spine).
 > 필드 이름과 구성은 구현하며 바뀔 수 있습니다.
 
-리깅된 캐릭터 모델을 레이어로 띄웁니다. `live2d`는 일러스트가 그대로 움직이는 2D 모델(`.moc3`), `vrm`은 3D 툰 모델(`.vrm`)입니다.
+리깅된 캐릭터 모델을 레이어로 띄웁니다. `live2d`는 일러스트가 그대로 움직이는 2D 모델(`.moc3`), `vrm`은 3D 툰 모델(`.vrm`),
+`spine`은 본·메시 변형 기반 2D 스켈레탈 애니메이션(Spine `.skel`/`.json` + `.atlas`)입니다.
 
 **공통 규칙**
 
@@ -638,7 +639,7 @@ blend = "screen"
 - **클릭(`on_click`):** 왼쪽 클릭한 곳이 모델의 어느 부위인지 판정해 그 부위의 모션을 한 번 재생하고 대기 모션으로 돌아갑니다.
   `interactive = true`일 때만 동작합니다.
 - 대기 모션·눈 깜빡임·숨쉬기·물리로 늘 움직이므로 이 레이어가 있는 씬은 잠들지 않습니다. 비용은 사용자가 `fps`·`render_scale`로 정합니다(기본 상한 없음).
-- 생략한 필드는 `[types.scene.live2d]` · `[types.scene.vrm]`(사용자 값 > `defaults.toml`)에서 옵니다.
+- 생략한 필드는 `[types.scene.live2d]` · `[types.scene.vrm]` · `[types.scene.spine]`(사용자 값 > `defaults.toml`)에서 옵니다.
 
 | 필드 (공통) | 설명 |
 |---|---|
@@ -714,6 +715,45 @@ spring_bone = { wind = [0.3, 0.0, 0.0], wind_speed = 0.5 }
 
 MToon 셰이더는 `assets/shaders/vrm/` 파일이며 사용자 assets 디렉터리에서 교체할 수 있습니다.
 
+#### spine
+
+Spine 스켈레톤(`.skel` 바이너리 또는 `.json` + `.atlas` + 텍스처)을 그립니다. 대상은 Spine **4.2** 형식이며, 다른 버전 에디터로 내보낸
+파일은 이유와 함께 거절됩니다(Spine 런타임은 에디터 버전마다 형식이 다름).
+
+```toml
+[[layer]]
+type     = "spine"
+id       = "miku"
+model    = "spine/miku.skel"
+atlas    = "spine/miku.atlas"    # 생략하면 model과 같은 이름의 .atlas
+rect     = [460, 0, 1000, 1080]
+position = [500, 1040]           # rect 안에서 스켈레톤 원점(보통 발밑)
+scale    = 0.8
+skin     = "default"
+idle     = "idle"                # 트랙 0에서 반복
+tracks   = { 1 = "hair_wind" }   # 더 위 트랙에서 함께 반복할 애니메이션
+look_at  = { anchor = [960, 300], range = 700, bone = "look_target", max_offset = [60, 40] }
+on_click = { head_box = "tap_head", body_box = "tap_body" }   # 바운딩 박스 이름 → 애니메이션
+blink    = { animation = "blink" }
+```
+
+| 필드 | 설명 |
+|---|---|
+| `model` | `.skel` 또는 `.json` 스켈레톤 데이터 |
+| `atlas` | 텍스처 아틀라스. 아틀라스의 `pma`(premultiplied) 표시를 읽어 색을 맞춤 |
+| `position`, `scale` | `rect` 안에서 스켈레톤 원점의 위치와 배율 |
+| `skin` | 스킨 이름 |
+| `idle` | 대기 애니메이션 이름(트랙 0, 반복). 목록이면 그 안에서 무작위로 이어 재생 |
+| `tracks` | 트랙 번호 → 함께 반복할 애니메이션. 대기 위에 겹쳐 섞임(숨쉬기, 바람 등) |
+| `mix` | 애니메이션 전환 시 섞는 시간(초) |
+| `look_at` | 공통 필드 + `bone`(포인터 쪽으로 옮길 본, 보통 IK 제약의 타깃) · `max_offset`(스켈레톤 px). Live2D처럼 표준 시선 파라미터가 없어 본을 직접 지정 |
+| `on_click` | 바운딩 박스 어태치먼트 이름 → 애니메이션. 클릭한 곳이 그 다각형 안이면 클릭 트랙에서 한 번 재생 후 대기로 돌아감 |
+| `blink` | 공통 필드 + `animation`(눈 깜빡임 애니메이션 이름). 위 트랙에서 `interval`마다 재생 |
+| `physics` | 물리 제약(4.2) 적용 `{ enabled, wind, gravity }`. `wind`·`gravity`는 스켈레톤 좌표 `[x, y]` |
+
+Spine 런타임 라이선스 때문에 기본 빌드에는 들어 있지 않을 수 있습니다([roadmap.md](roadmap.md#m11--spine-레이어-설계) M11).
+빠진 빌드에서는 `spine` 레이어가 이유와 함께 거절됩니다.
+
 #### 빛 가리기 (빛줄기와 캐릭터·레이어)
 
 창문에서 들어오는 빛줄기를 캐릭터나 다른 레이어가 가리게 하는 패턴입니다. 지금 있는 기능(shader 레이어 + 레이어 `id` 입력)으로 되며,
@@ -743,8 +783,8 @@ blend   = "add"
   움직이지 않는 사진들은 미리 합친 마스크 PNG 하나를 경로 입력으로 넣어도 됩니다.
 
 **되지 않는 것:**
-- 캐릭터 몸에 비치는 빛(창문 쪽이 밝고 반대쪽이 어두운 음영). 캐릭터 레이어는 `[[light]]`를 받지 않습니다. live2d에 `lit`을
-  줄지는 열린 질문입니다(Live2D 모델에는 노멀맵이 없어 방향감이 약함). vrm은 MToon `light`로 음영을 받습니다.
+- 캐릭터 몸에 비치는 빛(창문 쪽이 밝고 반대쪽이 어두운 음영). live2d·spine 레이어는 `[[light]]`를 받지 않습니다. `lit`을
+  줄지는 열린 질문입니다(보통 노멀맵이 없어 방향감이 약함). vrm은 MToon `light`로 음영을 받습니다.
 - 바닥·벽에 떨어지는 캐릭터 그림자. 화면 공간 계산이라 투영 그림자는 없습니다. 그림자 이미지를 `multiply` 레이어로 두거나,
   vrm에 그림자 맵을 넣는 것(열린 질문)으로 다룹니다.
 

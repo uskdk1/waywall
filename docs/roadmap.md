@@ -194,7 +194,7 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 
 ## M9 — Live2D 레이어 (설계)
 캐릭터 일러스트가 그대로 움직이는 2D 리깅 모델을 씬 레이어로 띄운다. 형식 설계는
-[wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm-설계).
+[wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm--spine-설계).
 
 `.moc3`(Cubism)가 사실상 표준이지만 공식 런타임 Cubism Core는 소스가 공개되지 않은 독점 라이선스라 저장소·Nix 패키지에 넣어
 배포할 수 없다. 그래서 백엔드를 먼저 정한다.
@@ -231,8 +231,29 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 **완료 기준:** 예제 씬에서 VRM 모델이 `.vrma` 대기 모션으로 움직이고 머리카락이 SpringBone으로 흔들리며, 커서를 따라보고, 클릭하면
 모션이 재생됨. MToon 외곽선·그림자가 표준 뷰어와 비슷하게 보임. 파티클·블룸과 함께 합성됨.
 
-**순서:** M9a에서 라이선스나 기능 때문에 막히면 M10을 먼저 한다. 두 레이어는 같은 합성 경로(자기 텍스처에 그린 뒤 shader 레이어처럼
-합성)를 쓰므로 먼저 하는 쪽이 그 경로를 만든다.
+## M11 — Spine 레이어 (설계)
+본·메시 변형 기반 2D 스켈레탈 애니메이션(Esoteric Software Spine)을 씬 레이어로 띄운다. 게임 일러스트(로비 화면 등)에 많이 쓰이는
+방식이라 "일러스트가 움직이는" 배경에 맞는다. 형식 설계는 [wallpaper-format.md](wallpaper-format.md#spine).
+
+- 런타임: 공식 `spine-c`(4.2). 소스가 GitHub에 공개되어 있어 flake 입력(커밋 고정)으로 받아 빌드하고 FFI로 부른다.
+  Rust 바인딩 크레이트(`rusty_spine`)를 쓸지는 라이선스·유지 상태를 보고 정함
+- 런타임은 스켈레톤 포즈 → 어태치먼트 정점·UV·색·블렌드 모드·클리핑을 내고, 렌더는 waywall의 wgpu 파이프라인(`assets/shaders/spine/`)
+- 애니메이션 트랙(대기 0번, 겹침 트랙, 클릭 트랙), 전환 섞기(`mix`), 물리 제약, 스킨
+- 시선: 지정한 본(IK 타깃)을 포인터 쪽으로 옮김. 클릭: 바운딩 박스 어태치먼트 다각형 판정
+- cargo feature `spine`. 아래 라이선스 결론에 따라 기본 빌드 포함 여부를 정함(`packages.waywall-full`처럼 별도 패키지 가능)
+
+**열린 질문:**
+- 라이선스: Spine Runtimes는 소스 공개지만 오픈소스가 아니다. 런타임을 제품에 넣으려면 넣는 시점에 넣는 사람이 유효한 Spine Editor
+  라이선스를 가져야 하고(체험판 불가), 제품에 Spine Runtimes License를 함께 넣어야 한다. 누가 라이선스를 갖고, 기본 빌드에 넣을지
+- 다른 Spine 버전(4.1 이하) 파일을 받을지(런타임이 버전마다 다름 — 4.2만 받는 것으로 시작)
+- 시선용 본 이름 규약을 둘지(모델마다 다름)
+
+**완료 기준:** 예제 씬에서 Spine 스켈레톤이 대기 애니메이션과 겹침 트랙으로 움직이고, 지정한 본이 커서를 따라가며, 바운딩 박스를 클릭하면
+애니메이션이 재생되고 대기로 섞여 돌아감. premultiplied 아틀라스와 아닌 아틀라스 모두 가장자리 색이 맞음. 파티클·블룸과 함께 합성됨.
+
+**순서:** 사용자에게 미쿠 Live2D 예제 모델이 있으므로 **M9(Live2D)부터** 한다. M9a에서 라이선스나 기능 때문에 막히면 M10을 먼저 한다.
+M11은 Spine 모델이 생기면 진행한다. 세 레이어는 같은 합성 경로(자기 텍스처에 그린 뒤 shader 레이어처럼 합성)를 쓰므로
+먼저 하는 쪽이 그 경로를 만든다.
 
 ## 이후
 - 씬 정지 레이어 캐시: 구현·측정했으나 Iris Xe에서 이득이 없어 보류. 설계·측정·되살릴 조건·주의점은 [architecture.md](architecture.md#보류한-최적화-정지-레이어-캐시)

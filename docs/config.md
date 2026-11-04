@@ -153,8 +153,8 @@ density = 2.0
 
 Core는 독점 라이선스라 waywall 패키지에 들어 있지 않습니다. 받는 방법과 라이선스 조건은 [development.md](development.md#live2d-cubism-core-설계-m9).
 
-**캐릭터 레이어 기본값 초안.** 구현할 때 `assets/defaults.toml`의 `[types.scene.live2d]`·`[types.scene.vrm]`에 들어갈 키입니다
-(형식은 [wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm-설계)). 값은 구현하며 정합니다.
+**캐릭터 레이어 기본값 초안.** 구현할 때 `assets/defaults.toml`의 `[types.scene.live2d]`·`[types.scene.vrm]`·`[types.scene.spine]`에 들어갈 키입니다
+(형식은 [wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm--spine-설계)). 값은 구현하며 정합니다.
 
 ```toml
 [types.scene.live2d]       # 아직 defaults.toml에 없음 (M9)
@@ -174,6 +174,16 @@ blink    = { enabled = true, interval = [2.0, 6.0] }
 spring_bone = { enabled = true, wind = [0.0, 0.0, 0.0], wind_speed = 0.5 }
 light    = "scene"
 outline  = true
+
+[types.scene.spine]        # 아직 defaults.toml에 없음 (M11)
+render_scale = 1.0
+scale    = 1.0
+skin     = "default"
+idle     = "idle"
+mix      = 0.2             # 초
+look_at  = { range = 600.0, smoothing = 0.12, on_leave = "center", max_offset = [0.0, 0.0] }
+blink    = { enabled = false, interval = [2.0, 6.0] }   # 모델마다 애니메이션 이름이 달라 기본은 끔
+physics  = { enabled = true, wind = [0.0, 0.0], gravity = [0.0, 0.0] }
 ```
 
 ### `[visibility]`
