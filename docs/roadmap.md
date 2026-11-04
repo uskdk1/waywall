@@ -200,10 +200,12 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 배포할 수 없다. 그래서 백엔드를 먼저 정한다.
 
 - M9a: **mocari 검증** — 순수 Rust `.moc3` 런타임([docs.rs/mocari](https://docs.rs/mocari), wgpu 렌더러 있음)을 실제 모델로 확인:
-  물리(physics3), 클리핑 마스크, 블렌드 모드, 모션·표정, 눈 깜빡임·숨쉬기, 성능. 라이선스와 아래 열린 질문도 함께 확인
+  물리(physics3), 클리핑 마스크, 블렌드 모드, 모션·표정, 눈 깜빡임·숨쉬기, 성능. 라이선스와 아래 열린 질문도 함께 확인.
+  검증 모델: 사용자가 가진 Live2D 공식 샘플 "初音ミク" FREE판·PRO판(`~/miku_ja`, PRO판은 스키닝·애니메이션 베이크 포함).
+  둘 다 HitArea가 없다(`"HitAreas": []`). 샘플 이용 조건을 확인하기 전에는 저장소 `examples/`에 넣지 않는다
 - M9b: **백엔드 결정** — mocari, 또는 공식 Cubism Core를 런타임에 `dlopen`(사용자가 받아 둔 파일, 경로는 config
   [`[live2d] core`](config.md#live2d-설계-m9)). Core 경로에서는 waywall이 Core 없이 빌드·실행되고, live2d 레이어만 이유와 함께 거절한다
-- M9c: 구현 — 씬 `live2d` 레이어, 포인터 시선, HitArea 클릭 모션, 예제 씬
+- M9c: 구현 — 씬 `live2d` 레이어, 포인터 시선, 클릭 모션(모델 어디든 · HitArea · `drawable:<ID>` · `"*"`), 예제 씬
 
 **열린 질문:**
 - mocari의 라이선스와 완성도. 비공식 런타임으로 `.moc3`를 읽는 것이 모델 판매처 약관이나 Live2D 측 입장에 걸리는지(걸리면 Core 경로)
@@ -212,7 +214,8 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 - live2d 레이어에 `lit`(씬 `[[light]]` 음영)을 줄지. 노멀맵이 없어 방향감이 약하고, 빛 가리기는 `lit` 없이도 됨
   ([빛 가리기](wallpaper-format.md#빛-가리기-빛줄기와-캐릭터레이어))
 
-**완료 기준:** 예제 씬에서 Live2D 모델이 대기 모션·눈 깜빡임·숨쉬기로 움직이고, 커서를 따라보며, 머리를 클릭하면 그 HitArea의 모션이 재생됨.
+**완료 기준:** 예제 씬에서 Live2D 모델이 대기 모션·눈 깜빡임·숨쉬기로 움직이고, 커서를 따라보며, 모델을 클릭하면 모션이 재생되고
+모델 밖 클릭은 무시됨. HitArea가 있는 모델은 HitArea별, 없는 모델은 `drawable:<ID>`로 지정한 부위별 모션이 재생됨.
 모델 뒤·앞의 파티클과 블룸이 함께 보임. Core 경로라면 Core가 없을 때 다른 배경에는 영향 없이 그 레이어만 거절.
 
 ## M10 — VRM 레이어 (설계)

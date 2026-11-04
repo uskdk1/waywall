@@ -637,7 +637,13 @@ blend = "screen"
   (`anchor`·`range`·`smoothing`·`on_leave`, 방향 = `normalize(포인터 − anchor) × min(1, 거리 / range)`). 이 값을 모델의
   시선·머리 회전으로 옮기는 방법만 타입마다 다릅니다. `follow`는 이 레이어 타입에 쓰지 않습니다(레이어 자체를 옮기려면 `parallax`).
 - **클릭(`on_click`):** 왼쪽 클릭한 곳이 모델의 어느 부위인지 판정해 그 부위의 모션을 한 번 재생하고 대기 모션으로 돌아갑니다.
-  `interactive = true`일 때만 동작합니다.
+  `interactive = true`일 때만 동작합니다. 형식은 세 타입 공통입니다.
+  - 문자열 하나(`on_click = "Tap"`): 모델 **어디를 눌러도** 그 모션. 부위 정보가 없는 모델도 이것만으로 됩니다.
+  - 표(`on_click = { 부위 = "모션", … }`): 키는 타입별 부위 이름(live2d HitArea·drawable, vrm 본, spine 바운딩 박스).
+    특별한 키 `"*"`는 다른 키에 걸리지 않은 모델 위 클릭입니다.
+  - 판정 순서: 부위 키 → `"*"`. 부위가 겹치면 화면에서 위에 그려진 쪽이 이깁니다. 모델 밖(투명한 곳) 클릭은 무시하고 아래 레이어로 넘어갑니다
+    (파티클 `burst` 등은 원래대로 동작).
+  - "모델 위"는 지금 보이는 메시(불투명도가 0보다 큰 drawable·삼각형) 안인지로 판정합니다. GPU 읽기 없이 CPU에서 계산합니다.
 - 대기 모션·눈 깜빡임·숨쉬기·물리로 늘 움직이므로 이 레이어가 있는 씬은 잠들지 않습니다. 비용은 사용자가 `fps`·`render_scale`로 정합니다(기본 상한 없음).
 - 생략한 필드는 `[types.scene.live2d]` · `[types.scene.vrm]` · `[types.scene.spine]`(사용자 값 > `defaults.toml`)에서 옵니다.
 
@@ -647,7 +653,7 @@ blend = "screen"
 | `rect` | 그릴 영역 `[x, y, 폭, 높이]` (설계 px). 생략하면 설계 영역 전체 |
 | `render_scale` | 이 레이어를 그리는 해상도 배율 (shader 레이어와 같음) |
 | `look_at` | `{ anchor, range, smoothing, on_leave, … }` 위 공통 규칙 + 타입별 필드 |
-| `on_click` | 부위 이름 → 모션 (타입별) |
+| `on_click` | 모션 하나(모델 어디든) 또는 부위 이름 → 모션 표. 위 공통 규칙 |
 | `blink` | 자동 눈 깜빡임 `{ enabled, interval }` (`interval` = `[최소, 최대]` 초) |
 
 #### live2d
@@ -664,8 +670,15 @@ position = [500, 560]          # rect 안에서 모델 캔버스 중심
 scale    = 1.0
 idle     = "Idle"              # model3.json Motions의 그룹 이름 (그룹 안에서 무작위)
 look_at  = { anchor = [960, 300], range = 700, params = { ParamAngleX = 30, ParamAngleY = 30, ParamEyeBallX = 1, ParamEyeBallY = 1, ParamBodyAngleX = 10 } }
-on_click = { Head = "TapHead", Body = "TapBody" }   # HitArea 이름 → 모션 그룹
+on_click = { Head = "TapHead", "*" = "Tap" }        # HitArea 이름 → 모션 그룹, 나머지 모델 위는 "Tap"
 parameters = { ParamCheek = "$blush" }              # 고정 파라미터 값 (속성으로 조절)
+```
+
+HitArea가 없는 모델(예: Live2D 공식 미쿠 샘플은 `"HitAreas": []`)은 모션 하나만 적거나 drawable을 직접 지정합니다.
+
+```toml
+on_click = "Tap"                                              # 모델 어디든
+on_click = { "drawable:ArtMesh54" = "TapHead", "*" = "Tap" }  # 특정 drawable만 따로
 ```
 
 | 필드 | 설명 |
@@ -674,7 +687,7 @@ parameters = { ParamCheek = "$blush" }              # 고정 파라미터 값 (�
 | `position`, `scale` | `rect` 안에서 모델 캔버스의 중심과 배율 |
 | `idle` | 대기 모션 그룹 이름. 그룹 안의 모션을 무작위로 이어 재생 |
 | `look_at.params` | 파라미터 이름 → 최대값. 시선 방향의 x(오른쪽 +)·y(위 +) 성분에 최대값을 곱해 넣음. `…X` 이름은 x, `…Y` 이름은 y 성분 |
-| `on_click` | `model3.json` HitArea 이름 → 모션 그룹. 클릭한 곳이 HitArea의 drawable 메시 안이면 재생 |
+| `on_click` | 모션 그룹 하나, 또는 표. 표의 키는 `model3.json` HitArea 이름(그 HitArea의 drawable 메시 안), `drawable:<ID>`(그 drawable 메시 안), `"*"`. 모르는 키는 그 모델의 HitArea 이름 목록과 함께 거절 |
 | `physics` | `physics3.json` 적용 여부(bool) |
 | `breath` | 숨쉬기(파라미터 사인파) `{ enabled, params }` |
 | `parameters` | 파라미터 이름 → 고정값. 모션보다 나중에 적용. `"$속성"` 사용 가능 |
@@ -707,7 +720,7 @@ spring_bone = { wind = [0.3, 0.0, 0.0], wind_speed = 0.5 }
 | `camera` | `target`(휴머노이드 본 이름, 바라볼 점) · `distance`(m) · `height`(m, target 기준 세로 오프셋) · `fov`(도, 세로) · `yaw`·`pitch`(도) |
 | `animation` | 대기 모션 `.vrma`. 생략하면 기본 자세 + 숨쉬기 |
 | `look_at` | 공통 필드 + `head`(머리가 시선을 따라 도는 비율 0–1, 나머지는 눈). 각도 한계는 모델의 `lookAt` 범위 |
-| `on_click` | 휴머노이드 본 이름 → `.vrma`. 클릭 지점에서 모델로 광선을 쏴 맞은 삼각형의 가장 큰 스킨 가중치 본(또는 그 조상 중 키에 있는 본) |
+| `on_click` | `.vrma` 하나, 또는 휴머노이드 본 이름(·`"*"`) → `.vrma`. 클릭 지점에서 모델로 광선을 쏴 맞은 삼각형의 가장 큰 스킨 가중치 본(또는 그 조상 중 키에 있는 본) |
 | `expressions` | 표정 프리셋·커스텀 이름 → 가중치 0–1(고정). `"$속성"` 사용 가능 |
 | `spring_bone` | `{ enabled, wind, wind_speed }`. `wind`는 모델 공간 방향 × 세기, `wind_speed`는 바람이 바뀌는 빠르기 |
 | `light` | MToon 조명. `"scene"`이면 씬의 `directional`·`ambient` 광원을 씀(없으면 아래 값). 또는 `{ direction, color, intensity, ambient }` |
@@ -747,7 +760,7 @@ blink    = { animation = "blink" }
 | `tracks` | 트랙 번호 → 함께 반복할 애니메이션. 대기 위에 겹쳐 섞임(숨쉬기, 바람 등) |
 | `mix` | 애니메이션 전환 시 섞는 시간(초) |
 | `look_at` | 공통 필드 + `bone`(포인터 쪽으로 옮길 본, 보통 IK 제약의 타깃) · `max_offset`(스켈레톤 px). Live2D처럼 표준 시선 파라미터가 없어 본을 직접 지정 |
-| `on_click` | 바운딩 박스 어태치먼트 이름 → 애니메이션. 클릭한 곳이 그 다각형 안이면 클릭 트랙에서 한 번 재생 후 대기로 돌아감 |
+| `on_click` | 애니메이션 하나, 또는 바운딩 박스 어태치먼트 이름(·`"*"`) → 애니메이션. 클릭한 곳이 그 다각형 안이면 클릭 트랙에서 한 번 재생 후 대기로 돌아감 |
 | `blink` | 공통 필드 + `animation`(눈 깜빡임 애니메이션 이름). 위 트랙에서 `interval`마다 재생 |
 | `physics` | 물리 제약(4.2) 적용 `{ enabled, wind, gravity }`. `wind`·`gravity`는 스켈레톤 좌표 `[x, y]` |
 
