@@ -145,13 +145,13 @@ density = 2.0
 
 ### `[live2d]` (설계, M9)
 
-> 설계 단계. M9b에서 공식 Cubism Core 백엔드를 고를 때만 생깁니다([roadmap.md](roadmap.md#m9--live2d-레이어-설계)).
+> 설계 단계([roadmap.md](roadmap.md#m9--live2d-레이어-설계) M9b).
 
 | 키 | 타입 | 내장값 | 설명 |
 |---|---|---|---|
-| `core` | 경로 | `""` | 사용자가 Live2D에서 받아 둔 Cubism Core 공유 라이브러리(`libLive2DCubismCore.so`). 비어 있거나 열 수 없으면 `live2d` 레이어가 이유와 함께 거절되고, 다른 배경은 영향 없음 |
+| `core` | 경로 | `""` | 비어 있으면 waywall에 들어 있는 PurismCore(Cubism Core 호환 오픈소스 재구현)를 씀. 경로를 적으면 그 Cubism Core ABI v6 공유 라이브러리(예: Live2D에서 받은 공식 `libLive2DCubismCore.so`)를 `dlopen`해 씀. 열 수 없거나 ABI가 맞지 않으면 `live2d` 레이어가 이유와 함께 거절되고, 다른 배경은 영향 없음 |
 
-Core는 독점 라이선스라 waywall 패키지에 들어 있지 않습니다. 받는 방법과 라이선스 조건은 [development.md](development.md#live2d-cubism-core-설계-m9).
+공식 Core는 독점 라이선스라 waywall 패키지에 들어 있지 않습니다. 받는 방법과 라이선스 조건은 [development.md](development.md#live2d-cubism-core-설계-m9).
 
 **캐릭터 레이어 기본값 초안.** 구현할 때 `assets/defaults.toml`의 `[types.scene.live2d]`·`[types.scene.vrm]`·`[types.scene.spine]`에 들어갈 키입니다
 (형식은 [wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm--spine-설계)). 값은 구현하며 정합니다.

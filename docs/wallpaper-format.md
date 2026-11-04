@@ -693,8 +693,8 @@ on_click = { "drawable:ArtMesh54" = "TapHead", "*" = "Tap" }  # 특정 drawable�
 | `parameters` | 파라미터 이름 → 고정값. 모션보다 나중에 적용. `"$속성"` 사용 가능 |
 | `expression` | 처음부터 켜 둘 표정 이름(`model3.json` Expressions). 생략하면 없음 |
 
-런타임 백엔드(순수 Rust 구현 또는 사용자가 받아 둔 공식 Cubism Core)는 M9b에서 정합니다. Core 경로라면 Core 파일 위치는
-config [`[live2d] core`](config.md#live2d-설계-m9)입니다.
+런타임은 waywall에 들어 있는 PurismCore(Cubism Core 호환 오픈소스 재구현)이며, 공식 Cubism Core를 쓰려면
+config [`[live2d] core`](config.md#live2d-설계-m9)에 그 라이브러리 경로를 적습니다(M9b).
 
 #### vrm
 

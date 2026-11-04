@@ -186,8 +186,10 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
     바꿔 부위를 판정한 뒤 모션을 시작한다. 판정은 CPU에서 지금 프레임의 메시로 한다(GPU 읽기 없음): 부위 키의 메시(HitArea·`drawable:<ID>`·
     바운딩 박스·본 가중치) → `"*"`/문자열이면 보이는 메시 전체, 겹치면 그리기 순서가 위인 쪽. 어디에도 안 맞으면 그 클릭은 이 레이어가 쓰지 않는다. 모션·물리 적분은 프레임마다 CPU(`dt`는 파티클과 같은 `max_step` 상한).
   - **live2d:** 백엔드가 파라미터 → drawable 메시(정점·UV·불투명도·그리기 순서·마스크)를 만들고, 렌더는 waywall의 wgpu 파이프라인
-    (`assets/shaders/live2d/`)이 한다. 클리핑 마스크는 마스크 drawable을 먼저 마스크 텍스처에 그려 알파를 곱한다. 백엔드는 trait 하나로 감싸
-    mocari와 `dlopen`한 Cubism Core를 바꿔 끼울 수 있게 한다(M9b에서 하나로 정함). Core가 없으면 로드 단계에서 그 레이어만 거절.
+    (`assets/shaders/live2d/`)이 한다. 클리핑 마스크는 마스크 drawable을 먼저 마스크 텍스처에 그려 알파를 곱한다. 백엔드는 Cubism Core C ABI
+    하나다: 링크된 PurismCore 또는 `[live2d] core`로 `dlopen`한 공식 Core를 같은 함수 포인터 표로 부른다(M9b). Core는 메시 변형만 하므로
+    `.motion3.json`·`.physics3.json`·`.pose3.json`·표정 적용과 모션 크로스페이드, 눈 깜빡임·숨쉬기는 waywall이 파라미터 배열에 쓴 뒤 `csmUpdateModel`을
+    부른다. 라이브러리를 열 수 없거나 ABI가 맞지 않으면 로드 단계에서 그 레이어만 거절.
   - **vrm:** 로드 시 glTF를 읽어 정점·인덱스·텍스처를 출력마다 업로드. 프레임마다 CPU가 `.vrma` 샘플링 → 휴머노이드 포즈 → LookAt → SpringBone
     → 본 행렬을 storage 버퍼로 쓰고, 버텍스 셰이더가 스키닝·모프를 한다(모프 가중치도 storage 버퍼). 깊이 버퍼(`Depth32Float`)는
     레이어 텍스처 크기로 레이어 안에서만 쓴다. MToon은 불투명 → 알파 컷 → 반투명(뒤에서 앞으로 정렬) 순서, 외곽선은 법선 방향으로 부풀린

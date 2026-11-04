@@ -199,20 +199,56 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 `.moc3`(Cubism)가 사실상 표준이지만 공식 런타임 Cubism Core는 소스가 공개되지 않은 독점 라이선스라 저장소·Nix 패키지에 넣어
 배포할 수 없다. 그래서 백엔드를 먼저 정한다.
 
-- M9a: **mocari 검증** — 순수 Rust `.moc3` 런타임([docs.rs/mocari](https://docs.rs/mocari), wgpu 렌더러 있음)을 실제 모델로 확인:
-  물리(physics3), 클리핑 마스크, 블렌드 모드, 모션·표정, 눈 깜빡임·숨쉬기, 성능. 라이선스와 아래 열린 질문도 함께 확인.
-  검증 모델: 사용자가 가진 Live2D 공식 샘플 "初音ミク" FREE판·PRO판(`~/miku_ja`, PRO판은 스키닝·애니메이션 베이크 포함).
-  둘 다 HitArea가 없다(`"HitAreas": []`). 샘플 이용 조건을 확인하기 전에는 저장소 `examples/`에 넣지 않는다
-- M9b: **백엔드 결정** — mocari, 또는 공식 Cubism Core를 런타임에 `dlopen`(사용자가 받아 둔 파일, 경로는 config
-  [`[live2d] core`](config.md#live2d-설계-m9)). Core 경로에서는 waywall이 Core 없이 빌드·실행되고, live2d 레이어만 이유와 함께 거절한다
+검증 모델: 사용자가 가진 Live2D 공식 샘플 "初音ミク" FREE판·PRO판(`~/miku_ja`, PRO판은 스키닝·애니메이션 베이크 포함).
+둘 다 HitArea가 없다(`"HitAreas": []`). 샘플 이용 조건을 확인하기 전에는 저장소 `examples/`에 넣지 않는다.
+
+- M9a: ~~**mocari 검증**~~ — **취소.** 순수 Rust `.moc3` 런타임 mocari는 기술적으로는 동작했으나(아래 결과),
+  제작자가 행방불명되어(GitHub 계정·저장소 `Eatgrapes/Mocari`가 사라짐, 2026-07 이후 릴리스 없음) 유지될 수 없다고 보고 백엔드 후보에서 뺐다.
+  결과는 비교 기준으로 남긴다
+- M9a′: **PurismCore 검증** — [SakuraMotion/PurismCore](https://github.com/SakuraMotion/PurismCore)(MIT, C99, v1.1.0)는 Cubism Core를
+  API·ABI 그대로 대신하는 오픈소스 재구현(Core 5.1 · 6.0 ABI)이다. 같은 미쿠 두 모델로 렌더·메시 변형을 확인하고, 같은 파라미터를 넣었을 때
+  mocari 결과와 픽셀을 비교한다. 클리핑 마스크·블렌드 모드는 이걸 쓰는 모델로 따로 확인
+- M9b: **백엔드 = Cubism Core C ABI 하나**(방향) — 기본은 Nix가 소스로 빌드한 PurismCore(사용자가 받을 파일 없음),
+  공식 Cubism Core를 원하면 config [`[live2d] core`](config.md#live2d-설계-m9)에 경로를 적어 그 라이브러리를 `dlopen`(같은 ABI라 코드는 하나).
+  Core는 메시 변형만 하므로 모션·크로스페이드·물리·포즈·표정·눈 깜빡임·숨쉬기·시선은 waywall이 구현한다(mocari 0.4.0의 MIT 코드는 참고만)
 - M9c: 구현 — 씬 `live2d` 레이어, 포인터 시선, 클릭 모션(모델 어디든 · HitArea · `drawable:<ID>` · `"*"`), 예제 씬
 
 **열린 질문:**
-- mocari의 라이선스와 완성도. 비공식 런타임으로 `.moc3`를 읽는 것이 모델 판매처 약관이나 Live2D 측 입장에 걸리는지(걸리면 Core 경로)
+- PurismCore도 비공식 재구현이다. 프로젝트는 Live2D 라이선스 없이 쓸 수 있다고 밝히지만, 모델 판매처 약관이 "공식 SDK로만 사용"을 요구하는
+  경우가 있는지(그런 모델은 사용자가 공식 Core 경로를 쓰면 됨)
 - Cubism 배포 라이선스는 개인·소규모 사업자(연 매출 1천만 엔 미만)를 면제하지만 "확장 가능한 앱(Expandable Application)"은 예외다.
   아무 모델이나 불러오는 waywall이 여기에 해당하는지
 - live2d 레이어에 `lit`(씬 `[[light]]` 음영)을 줄지. 노멀맵이 없어 방향감이 약하고, 빛 가리기는 `lit` 없이도 됨
   ([빛 가리기](wallpaper-format.md#빛-가리기-빛줄기와-캐릭터레이어))
+
+**M9a′ 결과 (2026-11-04, Intel Iris Xe / Mesa, PurismCore v1.1.0 `1069334`, ABI v6 · compat 6.0.1):** M9a와 같은 검증 프로그램에서
+PurismCore(정적 링크, 직접 쓴 최소 FFI)로 메시를 만들고 같은 렌더러로 그려 mocari 결과와 비교. 파라미터는 mocari가 계산한 값(모션·물리 적용 후)을 그대로 넣음.
+- 두 모델 모두 MOC3 v3.x(`csmMocVersion_30`)로 읽힘. drawable 수·ID 순서·그리기 순서·렌더 순서가 mocari와 같음
+- **좌표 규약:** 정점 위치는 같은 모델 공간. UV는 세로가 반대(Core `v` = mocari `1 − v`, Core는 왼쪽 아래 원점)
+- **메시 일치:** 기본 자세 정점 위치 차이 최대 1.4e-3(FREE)·8.9e-4(PRO) 모델 단위. 렌더 결과 2% 넘게 다른 픽셀이
+  기본 0.14%·0.19%, 대기 모션 0.98%·0.19%, 물리 후 0.007%·0.003%(FREE·PRO). 차이는 팔·소매 윤곽선의 1 px 미만 어긋남뿐이고 눈으로는 구별되지 않음.
+  공식 Core가 없어 어느 쪽이 정답인지는 판정 못 함(Purism은 공식 Core와의 일치를 1만 개 이상 테스트로 확인했다고 밝힘)
+- **성능:** `csmUpdateModel` + 메시 읽기 프레임당 CPU 0.06–0.07 ms(FREE)·0.08–0.10 ms(PRO)
+- **확인 못 함:** 클리핑 마스크·블렌드 모드·multiply/screen 색(두 모델 모두 쓰지 않음) — 이걸 쓰는 모델로 따로 확인 필요.
+  사용자가 가진 "모모세 히요리(영상용 버전) PRO"(`~/hiyori_movie_ko`)는 Editor 원본(`.cmo3`·`.can3`)만 있고 런타임 파일(`.moc3`)이 없어 쓸 수 없음.
+  런타임 폴더가 있는 일반판 히요리 샘플이 필요
+- 빌드는 `make CFLAGS="-O2 -fPIC"`로 `libPurismCore.a`·`.so`가 나옴(C99, 의존은 libc·libm). waywall에서는 flake 입력 + `cc` 빌드로 넣을 예정
+
+**M9a 결과 — 취소된 mocari 검증, 비교 기준으로 보관 (2026-11-04, Intel Iris Xe / Mesa, mocari 0.4.0):** 화면 없이 1024² 텍스처에 렌더해 PNG로 확인하는 검증 프로그램(저장소 밖)으로 확인.
+- 라이선스 MIT, `forbid(unsafe_code)`, 의존 wgpu 30(waywall과 같음). 렌더러는 feature `wgpu`라 코어만 쓸 수 있음
+- **렌더:** 두 모델 모두 기본 자세가 깨짐 없이 그려짐(FREE 88 drawable · 정점 1970, PRO 110 drawable · 정점 3507, 스키닝 포함 PRO도 정상). 로드 약 40 ms
+- **모션:** 대기 모션 1.5초 후 화면의 27%(FREE)·15%(PRO) 픽셀이 바뀜
+- **물리:** 고개를 오른쪽 → 왼쪽으로 돌린 직후, 물리를 켠 것과 끈 것의 차이가 **머리카락에만** 생김(몸·얼굴은 같음). `physics3.json`은 자동으로 읽힘
+- **성능:** 모션 + 물리 + 메시 갱신이 프레임당 CPU 0.066 ms(FREE)·0.153 ms(PRO)
+- **확인 못 함:** 클리핑 마스크·블렌드 모드(가산·곱하기)·multiply/screen 색 — 두 모델 모두 쓰지 않음(마스크 0, 가산·곱하기 0). 이걸 쓰는 다른 모델이 필요
+- **없는 기능(직접 구현):** 모션 간 크로스페이드(`MotionPlayer`가 모션의 FadeIn/FadeOut 시간을 쓰지 않아 전환이 튐 — 두 플레이어를 가중치로 섞어야 함),
+  눈 깜빡임·숨쉬기·시선(Cubism Framework 쪽 기능. `model3.json` Groups의 `EyeBlink` 파라미터 ID를 읽어 구현), `"*"`·`drawable:<ID>` 판정(메시 삼각형 판정, 정점·인덱스는 공개 API)
+- **색:** 내장 렌더러는 텍스처를 `Rgba8Unorm`(선형화 없음)으로 올리고 셰이더에서 알파를 곱함. waywall HDR 경로(선형, premultiplied)와 맞지 않으므로
+  설계대로 렌더는 waywall 파이프라인이 하고 mocari는 코어(메시 생성)만 쓴다
+- **파라미터 이름:** FREE판은 옛 이름(`PARAM_ANGLE_X`), PRO판은 새 이름(`ParamAngleX`). `look_at.params` 기본값만으로는 FREE판이 안 움직이므로 모델별로 적어야 함
+- **위험:** crates.io 첫 릴리스 2026-06-21, 마지막 0.4.0이 2026-07-13(이후 넉 달 릴리스 없음), README가 스스로 "experiment"라고 함.
+  **GitHub 저장소(`Eatgrapes/Mocari`)가 404, 제작자 계정도 사라짐** → 취소. 남은 포크(`Initsnow/Mocari`)는 2026-10에 커밋 1개뿐이라 대안이 되지 못함
+- 위 항목 중 크로스페이드·눈 깜빡임·숨쉬기·시선·클릭 판정·색 처리·파라미터 이름은 백엔드와 관계없이 M9c에서 그대로 해당한다
 
 **완료 기준:** 예제 씬에서 Live2D 모델이 대기 모션·눈 깜빡임·숨쉬기로 움직이고, 커서를 따라보며, 모델을 클릭하면 모션이 재생되고
 모델 밖 클릭은 무시됨. HitArea가 있는 모델은 HitArea별, 없는 모델은 `drawable:<ID>`로 지정한 부위별 모션이 재생됨.
@@ -254,7 +290,7 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 **완료 기준:** 예제 씬에서 Spine 스켈레톤이 대기 애니메이션과 겹침 트랙으로 움직이고, 지정한 본이 커서를 따라가며, 바운딩 박스를 클릭하면
 애니메이션이 재생되고 대기로 섞여 돌아감. premultiplied 아틀라스와 아닌 아틀라스 모두 가장자리 색이 맞음. 파티클·블룸과 함께 합성됨.
 
-**순서:** 사용자에게 미쿠 Live2D 예제 모델이 있으므로 **M9(Live2D)부터** 한다. M9a에서 라이선스나 기능 때문에 막히면 M10을 먼저 한다.
+**순서:** 사용자에게 미쿠 Live2D 예제 모델이 있으므로 **M9(Live2D)부터** 한다. M9a′에서 라이선스나 기능 때문에 막히면 M10을 먼저 한다.
 M11은 Spine 모델이 생기면 진행한다. 세 레이어는 같은 합성 경로(자기 텍스처에 그린 뒤 shader 레이어처럼 합성)를 쓰므로
 먼저 하는 쪽이 그 경로를 만든다.
 
