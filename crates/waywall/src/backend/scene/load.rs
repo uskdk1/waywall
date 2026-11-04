@@ -23,7 +23,7 @@ use super::{
     SceneSpec, ShaderLayer, Texture,
 };
 use crate::assets::Assets;
-use crate::backend::shader::{CHANNEL_NAMES, CHANNEL_SECTION, CHANNELS, parse_inputs};
+use crate::backend::shader::{CHANNEL_SECTION, channel_name, parse_inputs};
 use crate::config::{Layers, OutputConfig, merge};
 use crate::gpu::compile_wgsl;
 use crate::gpu::shadertoy::{self, Language, UniformLayout};
@@ -390,10 +390,11 @@ pub fn load(
                 let text = std::fs::read_to_string(&path)
                     .with_context(|| format!("layer `{id}`: {}", path.display()))?;
                 let lang = Language::from_path(&path);
-                let compiled = shadertoy::compile(assets, lang, &text, &props, &d.source)
-                    .with_context(|| format!("layer `{id}`"))?;
-                let mut inputs: [Option<ChannelInput>; CHANNELS] = Default::default();
-                let mut sampling = [d.channel; CHANNELS];
+                let compiled =
+                    shadertoy::compile(assets, lang, &text, &props, channels.len(), &d.source)
+                        .with_context(|| format!("layer `{id}`"))?;
+                let mut inputs: Vec<Option<ChannelInput>> = channels.iter().map(|_| None).collect();
+                let mut sampling = vec![d.channel; channels.len()];
                 for (i, c) in channels.into_iter().enumerate() {
                     let Some(c) = c else { continue };
                     sampling[i] = c.sampling;
@@ -404,7 +405,7 @@ pub fn load(
                     } else {
                         let file = base.join(&c.source);
                         let mut t = decode(&file).with_context(|| {
-                            format!("layer `{id}`: {}: {}", CHANNEL_NAMES[i], file.display())
+                            format!("layer `{id}`: {}: {}", channel_name(i), file.display())
                         })?;
                         if lang == Language::Glsl {
                             flip_rows(&mut t);
@@ -929,14 +930,14 @@ fn shader_effect(
     let path = base.join(&source);
     let text = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
     let lang = Language::from_path(&path);
-    let compiled = shadertoy::compile(assets, lang, &text, props, &source)?;
     let user_channel = layers
         .user_type_section(WallpaperKind::Scene, SHADER)
         .and_then(|t| t.get(CHANNEL_SECTION))
         .and_then(Value::as_table);
     let defs = parse_inputs(inputs.as_ref(), &opts.shader.channel, user_channel)?;
-    let mut channels: [Option<Texture>; CHANNELS] = Default::default();
-    let mut sampling = [opts.shader.channel; CHANNELS];
+    let compiled = shadertoy::compile(assets, lang, &text, props, defs.len(), &source)?;
+    let mut channels: Vec<Option<Texture>> = defs.iter().map(|_| None).collect();
+    let mut sampling = vec![opts.shader.channel; defs.len()];
     for (i, c) in defs.into_iter().enumerate() {
         let Some(c) = c else { continue };
         ensure!(
@@ -950,7 +951,7 @@ fn shader_effect(
         );
         let file = base.join(&c.source);
         let mut t =
-            decode(&file).with_context(|| format!("{}: {}", CHANNEL_NAMES[i], file.display()))?;
+            decode(&file).with_context(|| format!("{}: {}", channel_name(i), file.display()))?;
         if lang == Language::Glsl {
             flip_rows(&mut t);
         }

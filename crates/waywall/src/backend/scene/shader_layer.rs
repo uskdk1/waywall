@@ -12,7 +12,7 @@ use super::render::{
     upload_texture,
 };
 use super::{ChannelInput, ShaderLayer};
-use crate::backend::shader::{CHANNELS, Draw, ShaderRenderer, empty_texture, frame_inputs};
+use crate::backend::shader::{Draw, ShaderRenderer, empty_texture, frame_inputs};
 use crate::backend::view::FrameInfo;
 use crate::gpu::shadertoy::Language;
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
@@ -232,7 +232,8 @@ pub struct GpuShaderLayer {
     /// HDR 버퍼에 직접 그리는지 (docs/architecture.md#씬-렌더러).
     direct: bool,
     renderer: ShaderRenderer,
-    inputs: [Option<Input>; CHANNELS],
+    /// 채널마다 (길이 = 채널 수).
+    inputs: Vec<Option<Input>>,
     /// 텍스처 경유일 때의 결과.
     output: Option<Target>,
     /// 그리는 영역 크기 (렌더 px).
@@ -293,32 +294,35 @@ impl GpuShaderLayer {
         );
         quad.clip = clip;
         quad.follow = follow.map(FollowState::new);
-        let inputs = inputs.map(|i| {
-            i.map(|i| match i {
-                ChannelInput::Image(t) => {
-                    let texture = upload_texture(gpu, d, &id, &t, TEXTURE_FORMAT);
-                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                    Input::Image {
-                        _texture: texture,
-                        view,
-                        size: [t.width, t.height],
+        let inputs: Vec<Option<Input>> = inputs
+            .into_iter()
+            .map(|i| {
+                i.map(|i| match i {
+                    ChannelInput::Image(t) => {
+                        let texture = upload_texture(gpu, d, &id, &t, TEXTURE_FORMAT);
+                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        Input::Image {
+                            _texture: texture,
+                            view,
+                            size: [t.width, t.height],
+                        }
                     }
-                }
-                ChannelInput::Below | ChannelInput::Layer(_) => Input::Crop {
-                    source: match i {
-                        ChannelInput::Layer(j) => CropSource::Layer(j),
-                        _ => CropSource::Below,
+                    ChannelInput::Below | ChannelInput::Layer(_) => Input::Crop {
+                        source: match i {
+                            ChannelInput::Layer(j) => CropSource::Layer(j),
+                            _ => CropSource::Below,
+                        },
+                        uniforms: d.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some(&id),
+                            size: (CROP_WORDS * size_of::<u32>()) as u64,
+                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        }),
+                        bound: None,
                     },
-                    uniforms: d.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&id),
-                        size: (CROP_WORDS * size_of::<u32>()) as u64,
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }),
-                    bound: None,
-                },
+                })
             })
-        });
+            .collect();
         let empty = upload_texture(gpu, d, &id, &empty_texture(), TEXTURE_FORMAT);
         let empty_view = empty.create_view(&wgpu::TextureViewDescriptor::default());
         Ok(Self {
@@ -408,8 +412,7 @@ impl GpuShaderLayer {
                 _ => &self.empty_view,
             })
             .collect();
-        self.renderer
-            .bind(gpu, [views[0], views[1], views[2], views[3]]);
+        self.renderer.bind(gpu, &views);
         if !self.direct {
             let output = Target::new(d, &self.id, OUTPUT_FORMAT, self.size);
             let clip = self
@@ -442,7 +445,7 @@ impl GpuShaderLayer {
         ]);
         let origin = [top_left[0].round() as i32, top_left[1].round() as i32];
         let flip = self.lang == Language::Glsl;
-        let mut resolution = [[0.0; 3]; CHANNELS];
+        let mut resolution = vec![[0.0; 3]; self.inputs.len()];
         for (i, input) in self.inputs.iter().enumerate() {
             match input {
                 Some(Input::Crop {

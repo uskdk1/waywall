@@ -15,7 +15,24 @@ const GLSL_EPILOGUE: &str = "shaders/shadertoy/epilogue.glsl";
 const WGSL_PRELUDE: &str = "shaders/shadertoy/prelude.wgsl";
 /// 프리앰블에서 속성 선언으로 바뀌는 줄.
 const PROPERTIES_MARKER: &str = "// waywall:properties";
+/// 프리앰블에서 채널 수만큼의 해상도 배열(uniform 멤버)로 바뀌는 줄.
+const CHANNEL_RESOLUTION_MARKER: &str = "// waywall:channel_resolution";
+/// 프리앰블에서 채널 텍스처·샘플러 선언으로 바뀌는 줄.
+const CHANNELS_MARKER: &str = "// waywall:channels";
 const PROPERTY_PREFIX: &str = "u_";
+
+/// Shadertoy와 같이 늘 선언하는 채널 수(`iChannel0`–`iChannel3`). 입력을 지정하지 않은 Shadertoy 셰이더도 컴파일되게 한다.
+pub const SHADERTOY_CHANNELS: usize = 4;
+/// 바인딩: 0 = uniform, 1..=N = 채널 텍스처, N+1..=2N = 채널 샘플러 (N = 채널 수).
+const TEXTURE_BINDING: u32 = 1;
+
+pub fn texture_binding(i: usize) -> u32 {
+    TEXTURE_BINDING + i as u32
+}
+
+pub fn sampler_binding(channels: usize, i: usize) -> u32 {
+    TEXTURE_BINDING + (channels + i) as u32
+}
 
 /// 엔트리 포인트 이름 (인터페이스).
 pub const GLSL_ENTRY: &str = "main";
@@ -58,12 +75,13 @@ impl std::fmt::Debug for Compiled {
     }
 }
 
-/// `name`: 오류 메시지에 쓸 사용자 파일 이름.
+/// `name`: 오류 메시지에 쓸 사용자 파일 이름. `channels`: 셰이더가 받는 채널 수(`SHADERTOY_CHANNELS` 이상).
 pub fn compile(
     assets: &Assets,
     lang: Language,
     user: &str,
     props: &[Property],
+    channels: usize,
     name: &str,
 ) -> Result<Compiled> {
     let (prelude, epilogue) = match lang {
@@ -74,6 +92,7 @@ pub fn compile(
         Language::Wgsl => (asset_text(assets, WGSL_PRELUDE)?, String::new()),
     };
     let prelude = insert_properties(&prelude, lang, props)?;
+    let prelude = insert_channels(&prelude, lang, channels)?;
     let source = format!("{prelude}{user}\n{epilogue}");
     let map = LineMap {
         name,
@@ -141,13 +160,25 @@ fn asset_text(assets: &Assets, rel: &str) -> Result<String> {
     String::from_utf8(bytes.into_owned()).with_context(|| format!("{rel} is not UTF-8"))
 }
 
+/// 앞뒤 공백을 빼고 `marker`와 같은 줄을 `text`로 바꾼다(주석 안에 적힌 이름은 그대로). 그런 줄이 없으면 `None`.
+fn replace_marker_line(prelude: &str, marker: &str, text: &str) -> Option<String> {
+    let mut found = false;
+    let out: String = prelude
+        .split_inclusive('\n')
+        .map(|line| {
+            if line.trim() == marker {
+                found = true;
+                let eol = if line.ends_with('\n') { "\n" } else { "" };
+                format!("{text}{eol}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    found.then_some(out)
+}
+
 fn insert_properties(prelude: &str, lang: Language, props: &[Property]) -> Result<String> {
-    if !prelude.contains(PROPERTIES_MARKER) {
-        if props.is_empty() {
-            return Ok(prelude.to_owned());
-        }
-        bail!("shader prelude has no `{PROPERTIES_MARKER}` line for wallpaper properties");
-    }
     let decls: String = props
         .iter()
         .map(|p| {
@@ -163,7 +194,50 @@ fn insert_properties(prelude: &str, lang: Language, props: &[Property]) -> Resul
         })
         .collect::<Vec<_>>()
         .join(" ");
-    Ok(prelude.replace(PROPERTIES_MARKER, &decls))
+    match replace_marker_line(prelude, PROPERTIES_MARKER, &decls) {
+        Some(out) => Ok(out),
+        None if props.is_empty() => Ok(prelude.to_owned()),
+        None => bail!("shader prelude has no `{PROPERTIES_MARKER}` line for wallpaper properties"),
+    }
+}
+
+/// 채널 해상도 배열과 채널 텍스처·샘플러 선언을 채널 수만큼 만든다. 표시 줄이 없는 프리앰블(직접 바꾼 예전 파일)은
+/// 채널이 Shadertoy 기본 수일 때만 그대로 쓴다.
+fn insert_channels(prelude: &str, lang: Language, channels: usize) -> Result<String> {
+    let resolution = match lang {
+        Language::Glsl => format!("    vec3  iChannelResolution[{channels}];"),
+        Language::Wgsl => format!("    channel_resolution: array<vec3<f32>, {channels}>,"),
+    };
+    let decls: Vec<String> = (0..channels)
+        .flat_map(|i| {
+            let (t, s) = (texture_binding(i), sampler_binding(channels, i));
+            match lang {
+                Language::Glsl => vec![
+                    format!("layout(set = 0, binding = {t}) uniform texture2D waywall_channel{i};"),
+                    format!("layout(set = 0, binding = {s}) uniform sampler waywall_sampler{i};"),
+                    format!(
+                        "#define iChannel{i} sampler2D(waywall_channel{i}, waywall_sampler{i})"
+                    ),
+                ],
+                Language::Wgsl => vec![
+                    format!("@group(0) @binding({t}) var channel{i}: texture_2d<f32>;"),
+                    format!("@group(0) @binding({s}) var channel{i}_sampler: sampler;"),
+                ],
+            }
+        })
+        .collect();
+    let has = |marker: &str| prelude.lines().any(|l| l.trim() == marker);
+    match (has(CHANNEL_RESOLUTION_MARKER), has(CHANNELS_MARKER)) {
+        (true, true) => {
+            let out = replace_marker_line(prelude, CHANNEL_RESOLUTION_MARKER, &resolution)
+                .and_then(|p| replace_marker_line(&p, CHANNELS_MARKER, &decls.join("\n")));
+            out.context("shader prelude channel markers")
+        }
+        (false, false) if channels == SHADERTOY_CHANNELS => Ok(prelude.to_owned()),
+        _ => bail!(
+            "shader prelude needs both `{CHANNEL_RESOLUTION_MARKER}` and `{CHANNELS_MARKER}` lines for {channels} channels"
+        ),
+    }
 }
 
 /// 합친 소스의 줄 번호를 사용자 파일 기준으로 바꾼다.
@@ -204,8 +278,8 @@ pub struct Inputs {
     pub mouse: [f32; 4],
     pub pointer: [f32; 4],
     pub click: [f32; 4],
-    /// 채널 픽셀 크기 (z = 1, 없는 채널은 0).
-    pub channel_resolution: [[f32; 3]; 4],
+    /// 채널 픽셀 크기 (z = 1, 없는 채널은 0). 채널 수만큼.
+    pub channel_resolution: Vec<[f32; 3]>,
     /// 그리는 영역의 왼쪽 위 (렌더 타깃 px). 배경과 텍스처에 그리는 레이어는 0.
     pub origin: [f32; 2],
 }
@@ -519,8 +593,15 @@ mod tests {
                     .unwrap_or_else(|e| panic!("{}: {e:#}", file.display()));
             }
             let src = std::fs::read_to_string(&path).unwrap();
-            let c = compile(&assets(), Language::from_path(&path), &src, &[], "x")
-                .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+            let c = compile(
+                &assets(),
+                Language::from_path(&path),
+                &src,
+                &[],
+                channels.len(),
+                "x",
+            )
+            .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
             assert!(c.layout.size > 0, "{}", path.display());
             n += 1;
         }
@@ -549,11 +630,11 @@ mod tests {
                 "@fragment fn main_image(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> { return g.u_tint * g.u_density + g.mouse + vec4<f32>(g.resolution, g.time) + vec4<f32>(g.channel_resolution[1], 0.0); }",
             ),
         ] {
-            let c = compile(&assets(), lang, src, &props, "t").unwrap();
+            let c = compile(&assets(), lang, src, &props, SHADERTOY_CHANNELS, "t").unwrap();
             let inputs = Inputs {
                 resolution: [1920.0, 1080.0, 1.0],
                 time: 3.0,
-                channel_resolution: [[0.0; 3], [640.0, 360.0, 1.0], [0.0; 3], [7.0, 8.0, 1.0]],
+                channel_resolution: vec![[0.0; 3], [640.0, 360.0, 1.0], [0.0; 3], [7.0, 8.0, 1.0]],
                 ..Default::default()
             };
             let buf = c.layout.write(&c.layout.slots(&props), &inputs, &props);
@@ -594,12 +675,90 @@ mod tests {
         }
     }
 
+    /// 4개를 넘는 채널: 선언·바인딩·해상도 배열이 채널 수만큼 생기고, 0–3은 Shadertoy와 같다
+    /// (docs/wallpaper-format.md#텍스처-입력-ichanneln).
+    #[test]
+    fn more_than_four_channels() {
+        let n = 9;
+        for (lang, src) in [
+            (
+                Language::Glsl,
+                "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel8, p) + texture(iChannel0, p) + vec4(iChannelResolution[8], 0.0); }",
+            ),
+            (
+                Language::Wgsl,
+                "@fragment fn main_image(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> { return textureSample(channel8, channel8_sampler, p.xy) + textureSample(channel0, channel0_sampler, p.xy) + vec4<f32>(g.channel_resolution[8], 0.0); }",
+            ),
+        ] {
+            let c = compile(&assets(), lang, src, &[], n, "t")
+                .unwrap_or_else(|e| panic!("{lang:?}: {e:#}"));
+            // 텍스처는 1..=n, 샘플러는 n+1..=2n.
+            let mut bindings: Vec<u32> = c
+                .module
+                .global_variables
+                .iter()
+                .filter_map(|(_, v)| v.binding.as_ref())
+                .filter(|b| b.group == 0 && b.binding > 0)
+                .map(|b| b.binding)
+                .collect();
+            bindings.sort_unstable();
+            assert_eq!(bindings.first(), Some(&texture_binding(0)), "{lang:?}");
+            assert_eq!(
+                bindings.last(),
+                Some(&sampler_binding(n, n - 1)),
+                "{lang:?}"
+            );
+            let mut res = vec![[0.0; 3]; n];
+            res[8] = [5.0, 6.0, 1.0];
+            let inputs = Inputs {
+                channel_resolution: res,
+                ..Default::default()
+            };
+            let buf = c.layout.write(&c.layout.slots(&[]), &inputs, &[]);
+            let ch = c
+                .layout
+                .members
+                .iter()
+                .find(|m| m.name == "iChannelResolution" || m.name == "channel_resolution")
+                .unwrap();
+            assert_eq!(ch.count, n as u32, "{lang:?}");
+            let at = ch.offset as usize + 8 * ch.stride as usize;
+            assert_eq!(f32::from_ne_bytes(buf[at..at + 4].try_into().unwrap()), 5.0);
+        }
+        // 표시 줄이 없는 예전 프리앰블은 기본 4채널일 때만 받는다.
+        let old = "#version 450\nlayout(location = 0) out vec4 waywall_fragColor;\n";
+        assert!(insert_channels(old, Language::Glsl, SHADERTOY_CHANNELS).is_ok());
+        let e = insert_channels(old, Language::Glsl, 5).unwrap_err();
+        assert!(format!("{e:#}").contains("waywall:channels"), "{e:#}");
+        // 주석 안에 적힌 표시 이름은 바뀌지 않는다.
+        let p =
+            "// see `// waywall:channels`\n// waywall:channel_resolution\n// waywall:channels\n";
+        let out = insert_channels(p, Language::Glsl, 4).unwrap();
+        assert!(out.starts_with("// see `// waywall:channels`\n"), "{out}");
+    }
+
     #[test]
     fn errors_point_at_user_lines() {
         let src = "void mainImage(out vec4 c, in vec2 p) {\n    c = vec4(1.0);\n    nope();\n}\n";
-        let e = compile(&assets(), Language::Glsl, src, &[], "bad.glsl").unwrap_err();
+        let e = compile(
+            &assets(),
+            Language::Glsl,
+            src,
+            &[],
+            SHADERTOY_CHANNELS,
+            "bad.glsl",
+        )
+        .unwrap_err();
         assert!(format!("{e:#}").contains("bad.glsl:3:"), "{e:#}");
-        let e = compile(&assets(), Language::Glsl, "void foo() {}", &[], "a.glsl").unwrap_err();
+        let e = compile(
+            &assets(),
+            Language::Glsl,
+            "void foo() {}",
+            &[],
+            SHADERTOY_CHANNELS,
+            "a.glsl",
+        )
+        .unwrap_err();
         assert!(format!("{e:#}").contains("a.glsl"), "{e:#}");
     }
 }

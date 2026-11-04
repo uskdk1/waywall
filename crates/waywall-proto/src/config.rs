@@ -209,7 +209,7 @@ pub struct ShaderOptions {
     pub channel: ChannelDefaults,
 }
 
-/// 텍스처 채널의 샘플링 (docs/wallpaper-format.md#텍스처-입력-ichannel0ichannel3).
+/// 텍스처 채널의 샘플링 (docs/wallpaper-format.md#텍스처-입력-ichanneln).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelDefaults {

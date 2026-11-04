@@ -26,6 +26,7 @@ waywall set --save examples/scenes/character     # 설정 파일에도 기록
 | `sunlight/` | shader 레이어 + `"below"` 입력(아래 그림의 밝은 곳에서 빛줄기), `render_scale` | `strength`, `sun` |
 | `lights/` | 조명: 노멀맵 벽, 커서를 따라가는 점광원, 흔들리는 횃불, 불씨 파티클 | `lamp` |
 | `character/` | 레이어 효과 `sway`(머리카락만 흔들림), `clip` + `follow`(흰자 안에서 커서를 따라보는 눈), 빛줄기 | `strength`, `sun` |
+| `stained-glass/` | 4개를 넘는 채널(`iChannel0`–`iChannel5`), 빛 가리기(광원과 가리는 레이어를 따로 입력): 해 앞 창틀 막대의 그림자 줄, 색유리를 지난 빨간·파란 빛기둥 | `strength`, `sun` |
 
 ## 웹 (`web/`)
 

@@ -56,7 +56,7 @@ type    = "color"
 default = "#88aaff"
 ```
 
-`type = "shader"`인 디렉터리형 배경은 `[inputs]`로 텍스처 채널을 넣을 수 있습니다([텍스처 입력](#텍스처-입력-ichannel0ichannel3)).
+`type = "shader"`인 디렉터리형 배경은 `[inputs]`로 텍스처 채널을 넣을 수 있습니다([텍스처 입력](#텍스처-입력-ichanneln)).
 
 속성 값은 `config.toml`의 출력별 설정에서 덮어쓸 수 있습니다([config.md](config.md)).
 전달 방식: shader → `u_<이름>` uniform, scene → `"$<이름>"` 참조, web → `window.waywall.properties`.
@@ -104,7 +104,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
 - 출력 색은 Shadertoy처럼 **변환 없이** 화면에 씁니다(sRGB가 아닌 swapchain 포맷). Shadertoy에서 보던 색 그대로입니다.
 - 셰이더 안의 줄 번호는 사용자 파일 기준으로 오류에 표시됩니다.
-- 아직 지원하지 않는 것: 멀티패스(Buffer A–D), 큐브맵·볼륨·키보드·오디오 채널. 쓰면 컴파일 오류가 됩니다. 텍스처 채널은 [아래](#텍스처-입력-ichannel0ichannel3).
+- 아직 지원하지 않는 것: 멀티패스(Buffer A–D), 큐브맵·볼륨·키보드·오디오 채널. 쓰면 컴파일 오류가 됩니다. 텍스처 채널은 [아래](#텍스처-입력-ichanneln).
 - naga GLSL 프론트엔드가 처리하지 못하는 구문이 있으면 오류가 `waywall list`와 `set`의 응답에 표시됩니다.
   shaderc(glslang) 대체 컴파일러는 로드맵입니다.
 
@@ -147,10 +147,10 @@ fn main_image(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32
 입력에 반응하지 않는 셰이더는 `interactive = false`로 두면 그 비용도 없습니다.
 
 
-### 텍스처 입력 (`iChannel0`–`iChannel3`)
+### 텍스처 입력 (`iChannelN`)
 
 디렉터리형 셰이더 배경은 `project.toml`의 `[inputs]`로 채널에 이미지를 넣습니다(배경 디렉터리 기준 경로).
-단일 파일 셰이더와 지정하지 않은 채널은 1×1 투명 텍스처이고 해상도는 0입니다.
+단일 파일 셰이더와 지정하지 않은 채널은 1×1 투명 텍스처이고 해상도는 0입니다. 채널은 4개로 정해져 있지 않습니다([4개를 넘는 채널](#4개를-넘는-채널)).
 
 ```toml
 [inputs]
@@ -168,17 +168,14 @@ iChannel1 = { source = "textures/rock.jpg", filter = "nearest", wrap = "clamp" }
 
 - **GLSL:** Shadertoy처럼 `texture(iChannel0, uv)`, `texelFetch`, `textureLod`, `iChannelResolution[n]`(`vec3`, 픽셀 크기)을 씁니다.
   이미지는 Shadertoy 기본값처럼 **상하를 뒤집어** 올리므로 `uv = (0, 0)`이 이미지의 왼쪽 아래입니다.
-- **WGSL:** `channel0`–`channel3`(`texture_2d<f32>`)과 `channel0_sampler`–`channel3_sampler`,
+- **WGSL:** `channel0`, `channel1`, …(`texture_2d<f32>`)과 `channel0_sampler`, `channel1_sampler`, …,
   `g.channel_resolution[n]`을 씁니다. `frag_coord`처럼 `uv = (0, 0)`이 이미지의 왼쪽 위입니다.
 - 셰이더 배경의 출력이 변환 없이 화면에 쓰이는 것처럼, 채널 값도 Shadertoy와 같이 **변환 없이** 읽힙니다
   (sRGB 값 그대로, 알파를 곱하지 않음).
 
-#### 채널 개수 제한 해제 (설계)
+#### 4개를 넘는 채널
 
-> **설계 단계.** 지금은 `iChannel0`–`iChannel3`만 받고 `iChannel4` 이상은 거절됩니다. 계획은
-> [roadmap.md](roadmap.md#m8b--셰이더-채널-개수-제한-해제-설계). 구현하면 이 절의 제목·앵커도 `iChannelN`으로 바꿉니다.
-
-4개 제한은 Shadertoy를 따라 한 것일 뿐 GPU 한계가 아닙니다. waywall 배경은 waywall에서 돌리므로 Shadertoy 사이트로 되돌려
+Shadertoy의 4개 제한은 GPU 한계가 아니라서 waywall은 따르지 않습니다([roadmap.md](roadmap.md#m8b--셰이더-채널-개수-제한-해제-) M8b). waywall 배경은 waywall에서 돌리므로 Shadertoy 사이트로 되돌려
 올리는 호환은 목표가 아니고(`iPointer`·`iClick`·`u_<속성>`도 이미 waywall 확장), **Shadertoy 셰이더를 가져다 쓰는 쪽만** 지킵니다.
 
 - `[inputs]`(셰이더 배경), shader 레이어 `inputs`, `shader` 효과 `inputs`에 `iChannel<N>`을 원하는 만큼 씁니다(N은 0부터의 정수).
@@ -187,9 +184,11 @@ iChannel1 = { source = "textures/rock.jpg", filter = "nearest", wrap = "clamp" }
 - 상한은 코드에 숫자로 두지 않고 GPU 어댑터 한도(`max_sampled_textures_per_shader_stage`, `max_samplers_per_shader_stage`)에서 정합니다.
   넘으면 그 한도 값과 함께 거절됩니다.
 - GLSL은 `iChannel<N>`·`iChannelResolution[N]`, WGSL은 `channel<N>`·`channel<N>_sampler`·`g.channel_resolution[N]` — 이름 규칙은 0–3과 같습니다.
-- 바인딩 규칙: 0 = uniform, 1–N = 채널 텍스처, N+1–2N = 채널 샘플러(지금의 1–4 / 5–8을 일반화).
-- 채널 선언은 waywall이 채널 수만큼 만들어 프리앰블의 표시 줄(`// @waywall:channels`) 자리에 넣고, `iChannelResolution` 배열 크기도
-  그 수로 정합니다. 사용자 assets의 프리앰블 교체 파일도 이 표시 줄을 두면 됩니다.
+  키는 `iChannel` + 10진수 그대로여야 합니다(`iChannel01`은 거절).
+- 바인딩 규칙(채널 수 N): 0 = uniform, 1–N = 채널 텍스처, N+1–2N = 채널 샘플러. N = 4이면 예전과 같은 1–4 / 5–8입니다.
+- 채널 선언은 waywall이 채널 수만큼 만들어 프리앰블의 표시 줄 자리에 넣습니다: `// waywall:channel_resolution`(uniform 블록 안,
+  `iChannelResolution`·`channel_resolution` 배열)과 `// waywall:channels`(텍스처·샘플러 선언). 줄 전체가 표시일 때만 바뀌고 주석 안의 이름은 그대로입니다.
+  사용자 assets의 프리앰블 교체 파일도 이 두 줄을 두면 됩니다. 두 줄이 없는 예전 교체 파일은 채널이 4개일 때만 그대로 씁니다.
 
 ## 씬 배경
 
@@ -787,11 +786,13 @@ blend   = "add"
 샘플마다:  빛 = 광원 입력의 밝은 픽셀 × Π (1 − 가리는 입력의 알파)
 ```
 
+- 화면 공간 계산이라 가리는 레이어는 **화면에서 광원(밝은 곳)을 덮는 곳에서만** 그림자 줄을 만듭니다. 창문 패턴(벽이 하늘을 덮고 창문만 뚫림),
+  해를 가로지르는 나뭇가지, 창문 앞에 선 캐릭터가 여기에 맞습니다. 광원과 겹치지 않는 물체는 빛줄기를 가리지 않습니다.
 - 투명한 곳(알파 0)은 그대로 통과합니다. 벽 사진에 창문 모양을 뚫어 두면 거기로만 빛이 들어옵니다.
 - 반투명(예: 커튼 알파 0.5)은 일부만 통과합니다. 가리는 입력의 색을 곱하면 스테인드글라스처럼 빛에 색이 입혀집니다.
 - 레이어 입력은 패럴랙스·`follow`·캐릭터 모션이 반영된 현재 모습이라, 움직이면 그림자 줄도 같이 움직입니다.
-- 가리는 레이어 수는 채널 수만큼입니다. 지금은 광원 1 + 가림 3이 최대이고, [채널 개수 제한 해제](#채널-개수-제한-해제-설계) 후에는 GPU 한도까지입니다.
-  움직이지 않는 사진들은 미리 합친 마스크 PNG 하나를 경로 입력으로 넣어도 됩니다.
+- 가리는 레이어 수는 GPU 한도까지입니다([4개를 넘는 채널](#4개를-넘는-채널)). 움직이지 않는 사진들은 미리 합친 마스크 PNG 하나를
+  경로 입력으로 넣어 채널을 아껴도 됩니다.
 
 **되지 않는 것:**
 - 캐릭터 몸에 비치는 빛(창문 쪽이 밝고 반대쪽이 어두운 음영). live2d·spine 레이어는 `[[light]]`를 받지 않습니다. `lit`을

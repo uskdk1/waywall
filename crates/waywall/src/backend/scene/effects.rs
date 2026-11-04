@@ -10,7 +10,7 @@ use waywall_proto::config::ChannelDefaults;
 use super::render::{TEXTURE_FORMAT, upload_texture};
 use super::shader_layer::{Cropper, OUTPUT_FORMAT, Target};
 use super::{EffectKind, EffectSpec, Texture};
-use crate::backend::shader::{CHANNELS, Draw, ShaderRenderer, empty_texture, frame_inputs};
+use crate::backend::shader::{Draw, ShaderRenderer, empty_texture, frame_inputs};
 use crate::backend::view::FrameInfo;
 use crate::gpu::shadertoy::{Language, UniformLayout};
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
@@ -145,7 +145,7 @@ enum Step {
         /// 셰이더 결과 (마스크로 섞기 전).
         raw: Target,
         mix_group: wgpu::BindGroup,
-        channel_resolution: [[f32; 3]; CHANNELS],
+        channel_resolution: Vec<[f32; 3]>,
         _textures: Vec<wgpu::Texture>,
     },
 }
@@ -323,8 +323,13 @@ impl GpuEffects {
                     if let (Some((t, uniforms, group)), Some(c)) = (flipped, cropper) {
                         c.run(gpu, encoder, t, uniforms, group, [0, 0], true, 1.0);
                     }
-                    let inputs =
-                        frame_inputs(f, self.resolution, [0.0, 0.0], 1.0, *channel_resolution);
+                    let inputs = frame_inputs(
+                        f,
+                        self.resolution,
+                        [0.0, 0.0],
+                        1.0,
+                        channel_resolution.clone(),
+                    );
                     let draw = Draw {
                         target: &raw.view,
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -345,8 +350,8 @@ struct ShaderStep {
     compiled: crate::gpu::shadertoy::Compiled,
     props: Vec<crate::properties::Property>,
     lang: Language,
-    channels: [Option<Texture>; CHANNELS],
-    sampling: [ChannelDefaults; CHANNELS],
+    channels: Vec<Option<Texture>>,
+    sampling: Vec<ChannelDefaults>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -381,7 +386,7 @@ fn shader_step(
     };
     let mut textures = Vec::new();
     let mut views = Vec::new();
-    let mut channel_resolution = [[0.0; 3]; CHANNELS];
+    let mut channel_resolution = vec![[0.0; 3]; s.channels.len()];
     channel_resolution[0] = [resolution.0 as f32, resolution.1 as f32, 1.0];
     for (i, ch) in s.channels.iter().enumerate().skip(1) {
         let t = ch.as_ref();
@@ -393,7 +398,9 @@ fn shader_step(
         textures.push(texture);
     }
     let ch0 = flipped.as_ref().map_or(input, |(t, ..)| &t.view);
-    renderer.bind(gpu, [ch0, &views[0], &views[1], &views[2]]);
+    let mut bound = vec![ch0];
+    bound.extend(views.iter());
+    renderer.bind(gpu, &bound);
     let raw = Target::new(d, label, OUTPUT_FORMAT, resolution);
     let (_, mix_layout) = shared
         .mix

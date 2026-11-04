@@ -1,0 +1,17 @@
+[wallpaper]
+name  = "Stained Glass"
+type  = "scene"
+entry = "scene.toml"
+
+[options]
+interactive = false   # 커서에 반응하지 않음
+
+[properties.strength]
+type    = "float"
+default = 1.6
+min     = 0.0
+max     = 8.0
+
+[properties.sun]
+type    = "color"
+default = "#fff4e0"

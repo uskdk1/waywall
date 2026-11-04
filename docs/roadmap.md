@@ -177,17 +177,30 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 실행 파일 경로만 설치에 맞게 고침)와 `contrib/niri/config.kdl`(`niri validate` 통과)을 두고 `docs/setup.md`(설치·실행·자동 시작)에 설명.
 예제를 실제로 등록하지는 않음. 문서의 지난 마일스톤 표기(“M6c부터”, “M6d로”) 정리.
 
-## M8b — 셰이더 채널 개수 제한 해제 (설계)
+## M8b — 셰이더 채널 개수 제한 해제 ✅
 `iChannel0`–`iChannel3` 고정(`backend/shader.rs`의 `CHANNELS = 4`, 프리앰블의 채널 선언 4쌍과 `iChannelResolution[4]`)을 없앤다.
 4개는 Shadertoy를 따라 한 값일 뿐이고, waywall 배경을 Shadertoy 사이트로 되돌려 올릴 일은 없으므로 가져오는 쪽 호환(0–3 그대로)만 지킨다.
-설계는 [wallpaper-format.md](wallpaper-format.md#채널-개수-제한-해제-설계).
+형식은 [wallpaper-format.md](wallpaper-format.md#4개를-넘는-채널).
 
-- 채널 수를 셰이더마다 `max(4, 쓴 가장 큰 N + 1)`로 정하고, 상한은 GPU 어댑터 한도에서 읽음(코드에 숫자 없음)
-- 프리앰블 GLSL·WGSL의 채널 선언을 표시 줄(`// @waywall:channels`) 자리에 생성, `iChannelResolution` 크기도 생성
-- 셰이더 배경 `[inputs]`, 씬 shader 레이어 `inputs`, `shader` 효과 `inputs`(1번부터)에 모두 적용
-- 고정 배열(`[_; CHANNELS]`)을 쓰는 곳: `backend/shader.rs`, `backend/scene/{mod, load, shader_layer, effects}.rs`, `daemon.rs`
-- 테스트: `iChannel4` 거절 테스트를 "어댑터 한도 초과 거절"로 바꾸고, 0과 높은 번호만 지정한 입력·채널 수 계산·생성된 프리앰블의 naga 검증 추가
-- 구현하면 문서 절 제목 `텍스처 입력 (iChannel0–iChannel3)`과 그 앵커를 쓰는 곳(문서 2곳, 프리앰블 주석 2곳, `examples/shaders/ripple/ripple.glsl`)을 함께 고침
+- 채널 수를 셰이더마다 `max(4, 쓴 가장 큰 N + 1)`로 정하고(`parse_inputs`가 그 길이의 목록을 돌려줌), 상한은 GPU 한도
+  (`max_sampled_textures_per_shader_stage`·`max_samplers_per_shader_stage`). 장치를 만들 때 이 두 한도를 어댑터 값 그대로 요청
+- 프리앰블 GLSL·WGSL의 표시 줄 `// waywall:channel_resolution`(uniform 블록 안 해상도 배열)·`// waywall:channels`(텍스처·샘플러 선언)를
+  채널 수만큼 생성. 줄 전체가 표시일 때만 바꿈(주석 안 이름은 그대로 — 속성 표시 줄 `// waywall:properties`도 같은 규칙으로 바꿈).
+  두 줄이 없는 예전 교체 프리앰블은 4채널일 때만 그대로 씀
+- 셰이더 배경 `[inputs]`, 씬 shader 레이어 `inputs`, `shader` 효과 `inputs`(1번부터) 모두 같은 경로. 고정 배열은 `Vec`으로
+- 4는 `SHADERTOY_CHANNELS`(Shadertoy 호환 인터페이스 값) 한 곳에만 남음
+
+**결과 (2026-11-04, niri, Intel Iris Xe / Mesa):** 테스트 데몬(별도 소켓)에서 광원 1(하늘·해) + 가림 레이어 5(막대 4개 + 색유리 1개,
+`iChannel1`–`iChannel5`)를 받는 빛줄기 씬이 두 출력에서 `playing`. 해를 덮은 막대 네 개가 각각 어두운 그림자 줄을 부채꼴로 내고,
+5번 채널(4개를 넘는 채널)의 색유리를 지난 빛이 붉게 물듦(화면 캡처). 채널 알파를 그대로 출력한 디버그 셰이더로 1·4·5번 채널이 제자리에 묶인 것도 확인.
+기존 예제 ripple·sunlight·character·pointer-glow는 그대로 `playing`, wgpu 오류 없음. 이 테스트 셰이더는 1080p 전체에 48 샘플 × 6 채널이라
+약 22 fps(예제의 비용; `render_scale`로 줄일 수 있음). 단위 테스트 59개(+9채널 GLSL·WGSL 컴파일과 바인딩·해상도 배열 배치,
+표시 줄 없는 예전 프리앰블, 주석 안 표시 이름, 채널 수 계산·중간 빈 채널, 잘못된 키 `iChannel01`·`iChannelX`).
+처음 테스트 셰이더(전체 해상도, 48 샘플)는 GPU를 다 써서 컴포지터까지 버벅였고, `render_scale = 0.5`·32 샘플로 줄이자 두 출력 약 59 fps.
+이를 예제 [`examples/scenes/stained-glass/`](../examples/scenes/stained-glass/)(하늘 + 창틀 막대 3 + 색유리 2, 채널 6개)로 정리:
+막대 세 개의 그림자 줄과 빨간·파란 빛기둥이 보이고 두 출력 59 fps.
+**구현 중 발견:** 화면 공간 빛줄기는 가리는 레이어가 화면에서 광원을 덮을 때만 그림자를 만든다(처음 테스트에서 막대가 해 밖에 있어 그림자가 없었음).
+[빛 가리기](wallpaper-format.md#빛-가리기-빛줄기와-캐릭터레이어)에 적음.
 
 **완료 기준:** 기존 예제(ripple, sunlight, character)가 그대로 동작하고 Shadertoy 셰이더가 수정 없이 컴파일됨. 광원 1 + 가림 레이어 4개 이상을
 입력으로 받는 빛줄기 셰이더가 각 레이어의 투명한 곳으로만 빛을 통과시킴([빛 가리기](wallpaper-format.md#빛-가리기-빛줄기와-캐릭터레이어)).

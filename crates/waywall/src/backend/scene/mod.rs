@@ -20,7 +20,6 @@ use waywall_proto::config::{
     VelocityRange,
 };
 
-use crate::backend::shader::CHANNELS;
 use crate::gpu::shadertoy::{Compiled, Language, UniformLayout};
 use crate::properties::Property;
 
@@ -136,8 +135,9 @@ pub struct ShaderLayer {
     pub compiled: Compiled,
     pub props: Vec<Property>,
     pub lang: Language,
-    pub inputs: [Option<ChannelInput>; CHANNELS],
-    pub sampling: [ChannelDefaults; CHANNELS],
+    /// 채널마다 (길이 = 채널 수).
+    pub inputs: Vec<Option<ChannelInput>>,
+    pub sampling: Vec<ChannelDefaults>,
     /// 그리는 해상도 배율.
     pub render_scale: f64,
     pub clip: Option<usize>,
@@ -176,8 +176,8 @@ pub enum EffectKind {
         compiled: Compiled,
         props: Vec<Property>,
         lang: Language,
-        channels: [Option<Texture>; CHANNELS],
-        sampling: [ChannelDefaults; CHANNELS],
+        channels: Vec<Option<Texture>>,
+        sampling: Vec<ChannelDefaults>,
     },
 }
 

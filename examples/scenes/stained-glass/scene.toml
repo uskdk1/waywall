@@ -1,0 +1,56 @@
+# M8b 예제: 4개를 넘는 채널 + 빛 가리기 (docs/wallpaper-format.md#4개를-넘는-채널).
+# 해 앞을 창틀 막대 3개와 색유리 2장이 덮는다. 막대는 빛줄기에 그림자 줄을, 색유리는 붉은·푸른 빛기둥을 만든다.
+# 빛줄기 셰이더는 각 레이어를 따로(iChannel0 = 하늘, 1–5 = 가리는 레이어) 받아 광원과 가림을 나눈다.
+
+[scene]
+width  = 1920
+height = 1080
+fit    = "cover"
+clear  = "#000000"
+
+[[layer]]
+type    = "image"
+id      = "sky"
+texture = "textures/sky.png"     # 480×270
+scale   = 4.0
+
+[[layer]]
+type    = "image"
+id      = "bar1"
+texture = "textures/bar1.png"
+scale   = 4.0
+
+[[layer]]
+type    = "image"
+id      = "bar2"
+texture = "textures/bar2.png"
+scale   = 4.0
+
+[[layer]]
+type    = "image"
+id      = "bar3"
+texture = "textures/bar3.png"
+scale   = 4.0
+
+[[layer]]
+type    = "image"
+id      = "glass_red"
+texture = "textures/glass_red.png"
+scale   = 4.0
+
+[[layer]]
+type    = "image"
+id      = "glass_blue"
+texture = "textures/glass_blue.png"
+scale   = 4.0
+
+[[layer]]
+type   = "shader"
+id     = "rays"
+source = "rays.glsl"
+inputs = { iChannel0 = "sky", iChannel1 = "bar1", iChannel2 = "bar2", iChannel3 = "bar3", iChannel4 = "glass_red", iChannel5 = "glass_blue" }
+blend  = "add"
+render_scale = 0.5               # 채널 6개 × 32 샘플이라 무거움. 빛줄기는 부드러워서 절반 해상도로 충분 (비용 약 1/4)
+
+[post]
+tonemap = "none"

@@ -1,5 +1,7 @@
 // waywall WGSL 프리앰블 (docs/wallpaper-format.md#wgsl-wgsl).
-// 필드는 이름으로 값을 채운다. `// waywall:properties` 줄은 배경 속성(u_<이름>) 선언으로 바뀐다.
+// 필드는 이름으로 값을 채운다. `// waywall:properties` 줄은 배경 속성(u_<이름>) 선언으로,
+// `// waywall:channel_resolution` 줄은 채널 수만큼의 channel_resolution 배열로,
+// `// waywall:channels` 줄은 채널 텍스처·샘플러(channel<N>, channel<N>_sampler) 선언으로 바뀐다.
 struct Globals {
     resolution: vec3<f32>,
     time: f32,
@@ -11,20 +13,14 @@ struct Globals {
     mouse: vec4<f32>,
     pointer: vec4<f32>,
     click: vec4<f32>,
-    channel_resolution: array<vec3<f32>, 4>,
+    // waywall:channel_resolution
     origin: vec2<f32>,      // 그리는 영역의 왼쪽 위 (렌더 타깃 px). 영역 안 좌표 = frag_coord.xy - origin
     // waywall:properties
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
 
-// 텍스처 채널: binding 1–4 텍스처, 5–8 샘플러 (docs/wallpaper-format.md#텍스처-입력-ichannel0ichannel3).
-@group(0) @binding(1) var channel0: texture_2d<f32>;
-@group(0) @binding(2) var channel1: texture_2d<f32>;
-@group(0) @binding(3) var channel2: texture_2d<f32>;
-@group(0) @binding(4) var channel3: texture_2d<f32>;
-@group(0) @binding(5) var channel0_sampler: sampler;
-@group(0) @binding(6) var channel1_sampler: sampler;
-@group(0) @binding(7) var channel2_sampler: sampler;
-@group(0) @binding(8) var channel3_sampler: sampler;
+// 텍스처 채널 channel0..N-1 (docs/wallpaper-format.md#텍스처-입력-ichanneln).
+// binding 1..N 텍스처, N+1..2N 샘플러. N = max(4, 쓴 가장 큰 번호 + 1).
+// waywall:channels
 

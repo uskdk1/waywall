@@ -1,5 +1,5 @@
-//! Shadertoy 형식 셰이더 렌더러: 화면을 덮는 삼각형 하나 + Shadertoy uniform + 텍스처 채널 4개
-//! (docs/wallpaper-format.md#셰이더-배경).
+//! Shadertoy 형식 셰이더 렌더러: 화면을 덮는 삼각형 하나 + Shadertoy uniform + 텍스처 채널 N개
+//! (docs/wallpaper-format.md#셰이더-배경). N = max(4, 쓴 가장 큰 채널 번호 + 1), 상한은 GPU 한도.
 //!
 //! `ShaderRenderer`는 셰이더 배경과 씬 shader 레이어가 함께 쓴다. 채널에 무엇을 묶을지는 쓰는 쪽이 정한다.
 
@@ -13,16 +13,15 @@ use waywall_proto::config::{ChannelDefaults, ChannelFilter, ChannelWrap};
 use crate::backend::scene::Texture;
 use crate::backend::view::FrameInfo;
 use crate::config::merge;
-use crate::gpu::shadertoy::{Compiled, Inputs, Language, Slots, UniformLayout};
+use crate::gpu::shadertoy::{
+    Compiled, Inputs, Language, SHADERTOY_CHANNELS, Slots, UniformLayout, sampler_binding,
+    texture_binding,
+};
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
 use crate::properties::Property;
 
-pub const CHANNELS: usize = 4;
-/// 채널 이름 (`[inputs]`의 키).
-pub const CHANNEL_NAMES: [&str; CHANNELS] = ["iChannel0", "iChannel1", "iChannel2", "iChannel3"];
-/// prelude의 바인딩: 0 = uniform, 1–4 = 채널 텍스처, 5–8 = 채널 샘플러.
-const TEXTURE_BINDING: u32 = 1;
-const SAMPLER_BINDING: u32 = TEXTURE_BINDING + CHANNELS as u32;
+/// 채널 이름(`[inputs]`의 키)의 앞부분. 뒤에 0부터의 번호가 붙는다.
+const CHANNEL_PREFIX: &str = "iChannel";
 /// 채널 입력 표의 필드.
 const SOURCE_KEY: &str = "source";
 /// `[types.<타입>]` 아래 채널 기본값 섹션 이름.
@@ -37,19 +36,31 @@ pub struct ChannelDef {
     pub sampling: ChannelDefaults,
 }
 
-/// `inputs` 표 → 채널별 정의. 계층: `defaults`(내장 < 사용자) < 채널 값 < `user`(사용자가 직접 적은 섹션).
+/// 채널 번호 → `[inputs]` 키 (`iChannel<N>`).
+pub fn channel_name(i: usize) -> String {
+    format!("{CHANNEL_PREFIX}{i}")
+}
+
+/// `iChannel<N>` → N. `iChannel01`처럼 다시 쓰면 다른 이름이 되는 키는 받지 않는다.
+fn channel_index(key: &str) -> Option<usize> {
+    let i: usize = key.strip_prefix(CHANNEL_PREFIX)?.parse().ok()?;
+    (channel_name(i) == key).then_some(i)
+}
+
+/// `inputs` 표 → 채널별 정의. 길이 = 셰이더가 받는 채널 수 (`SHADERTOY_CHANNELS` 이상, 쓴 가장 큰 번호 + 1).
+/// 계층: `defaults`(내장 < 사용자) < 채널 값 < `user`(사용자가 직접 적은 섹션).
 pub fn parse_inputs(
     inputs: Option<&Table>,
     defaults: &ChannelDefaults,
     user: Option<&Table>,
-) -> Result<[Option<ChannelDef>; CHANNELS]> {
-    let mut out: [Option<ChannelDef>; CHANNELS] = Default::default();
+) -> Result<Vec<Option<ChannelDef>>> {
+    let mut out: Vec<Option<ChannelDef>> = vec![None; SHADERTOY_CHANNELS];
     let Some(inputs) = inputs else {
         return Ok(out);
     };
     for (key, value) in inputs {
-        let Some(i) = CHANNEL_NAMES.iter().position(|n| n == key) else {
-            bail!("inputs: unknown channel `{key}` (iChannel0–iChannel3)");
+        let Some(i) = channel_index(key) else {
+            bail!("inputs: unknown channel `{key}` (iChannel0, iChannel1, …)");
         };
         let mut t = Table::try_from(defaults)?;
         let source = match value {
@@ -69,6 +80,9 @@ pub fn parse_inputs(
             merge(&mut t, u);
         }
         let sampling: ChannelDefaults = t.try_into().with_context(|| format!("inputs.{key}"))?;
+        if out.len() <= i {
+            out.resize(i + 1, None);
+        }
         out[i] = Some(ChannelDef { source, sampling });
     }
     Ok(out)
@@ -96,10 +110,10 @@ pub fn decode_channel(path: &Path, lang: Language) -> Result<Texture> {
 pub struct ShaderSpec {
     pub compiled: Compiled,
     pub props: Vec<Property>,
-    /// 지정하지 않은 채널은 `None` (1×1 투명).
-    pub channels: [Option<Texture>; CHANNELS],
+    /// 지정하지 않은 채널은 `None` (1×1 투명). 길이 = 채널 수.
+    pub channels: Vec<Option<Texture>>,
     /// 채널마다 샘플링 (지정하지 않은 채널은 기본값, 쓰이지 않음).
-    pub sampling: [ChannelDefaults; CHANNELS],
+    pub sampling: Vec<ChannelDefaults>,
 }
 
 pub struct ShaderRenderer {
@@ -123,15 +137,25 @@ pub struct Draw<'a> {
 }
 
 impl ShaderRenderer {
+    /// 채널 수는 `sampling`의 길이 (`compile`에 넘긴 수와 같아야 함).
     pub fn new(
         gpu: &Gpu,
         compiled: Compiled,
         props: Vec<Property>,
-        sampling: [ChannelDefaults; CHANNELS],
+        sampling: Vec<ChannelDefaults>,
         format: wgpu::TextureFormat,
         blend: Option<wgpu::BlendState>,
         name: &str,
     ) -> Result<Self> {
+        let channels = sampling.len();
+        let limits = gpu.device.limits();
+        let max = limits
+            .max_sampled_textures_per_shader_stage
+            .min(limits.max_samplers_per_shader_stage) as usize;
+        ensure!(
+            channels <= max,
+            "{name}: {channels} channels is more than this GPU allows ({max} per shader)"
+        );
         let layout = compiled.layout.clone();
         let slots = layout.slots(&props);
         let entry = compiled.entry;
@@ -155,9 +179,9 @@ impl ShaderRenderer {
                     },
                     count: None,
                 }];
-                for i in 0..CHANNELS as u32 {
+                for i in 0..channels {
                     entries.push(wgpu::BindGroupLayoutEntry {
-                        binding: TEXTURE_BINDING + i,
+                        binding: texture_binding(i),
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -167,7 +191,7 @@ impl ShaderRenderer {
                         count: None,
                     });
                     entries.push(wgpu::BindGroupLayoutEntry {
-                        binding: SAMPLER_BINDING + i,
+                        binding: sampler_binding(channels, i),
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
@@ -223,19 +247,21 @@ impl ShaderRenderer {
         })
     }
 
-    /// 채널 텍스처를 묶는다. 텍스처가 바뀔 때마다(크기 변경 등) 다시 부른다.
-    pub fn bind(&mut self, gpu: &Gpu, views: [&wgpu::TextureView; CHANNELS]) {
+    /// 채널 텍스처를 묶는다(채널 수만큼). 텍스처가 바뀔 때마다(크기 변경 등) 다시 부른다.
+    pub fn bind(&mut self, gpu: &Gpu, views: &[&wgpu::TextureView]) {
+        let channels = self.samplers.len();
+        debug_assert_eq!(views.len(), channels);
         let mut entries = vec![wgpu::BindGroupEntry {
             binding: 0,
             resource: self.uniforms.as_entire_binding(),
         }];
         for (i, (view, sampler)) in views.iter().zip(&self.samplers).enumerate() {
             entries.push(wgpu::BindGroupEntry {
-                binding: TEXTURE_BINDING + i as u32,
+                binding: texture_binding(i),
                 resource: wgpu::BindingResource::TextureView(view),
             });
             entries.push(wgpu::BindGroupEntry {
-                binding: SAMPLER_BINDING + i as u32,
+                binding: sampler_binding(channels, i),
                 resource: wgpu::BindingResource::Sampler(sampler),
             });
         }
@@ -294,7 +320,7 @@ pub fn frame_inputs(
     size: (u32, u32),
     origin: [f32; 2],
     scale: f32,
-    channel_resolution: [[f32; 3]; CHANNELS],
+    channel_resolution: Vec<[f32; 3]>,
 ) -> Inputs {
     let date = Local::now();
     let midnight = f64::from(date.num_seconds_from_midnight()) + f64::from(date.nanosecond()) / 1e9;
@@ -373,7 +399,7 @@ pub fn empty_texture() -> Texture {
 /// 셰이더 배경: 채널 이미지는 처음에 한 번 올린다.
 pub struct ShaderBackground {
     renderer: ShaderRenderer,
-    channel_resolution: [[f32; 3]; CHANNELS],
+    channel_resolution: Vec<[f32; 3]>,
     _textures: Vec<wgpu::Texture>,
 }
 
@@ -385,21 +411,21 @@ impl ShaderBackground {
         name: &str,
     ) -> Result<Self> {
         let max_dim = gpu.device.limits().max_texture_dimension_2d;
-        let mut channel_resolution = [[0.0; 3]; CHANNELS];
-        let mut textures = Vec::with_capacity(CHANNELS);
         let ShaderSpec {
             compiled,
             props,
             channels,
             sampling,
         } = spec;
+        let mut channel_resolution = vec![[0.0; 3]; channels.len()];
+        let mut textures = Vec::with_capacity(channels.len());
         for (i, ch) in channels.into_iter().enumerate() {
             let texture = match ch {
                 Some(t) => {
                     ensure!(
                         t.width <= max_dim && t.height <= max_dim,
                         "{}: texture {}x{} is larger than the GPU limit {max_dim}",
-                        CHANNEL_NAMES[i],
+                        channel_name(i),
                         t.width,
                         t.height
                     );
@@ -412,7 +438,7 @@ impl ShaderBackground {
                 crate::backend::scene::upload_texture(
                     gpu,
                     d,
-                    CHANNEL_NAMES[i],
+                    &channel_name(i),
                     &texture,
                     wgpu::TextureFormat::Rgba8Unorm,
                 )
@@ -423,7 +449,7 @@ impl ShaderBackground {
             .iter()
             .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
             .collect();
-        renderer.bind(gpu, [&views[0], &views[1], &views[2], &views[3]]);
+        renderer.bind(gpu, &views.iter().collect::<Vec<_>>());
         Ok(Self {
             renderer,
             channel_resolution,
@@ -439,7 +465,7 @@ impl ShaderBackground {
         f: &FrameInfo<'_>,
         name: &str,
     ) {
-        let inputs = frame_inputs(f, f.size, [0.0, 0.0], 1.0, self.channel_resolution);
+        let inputs = frame_inputs(f, f.size, [0.0, 0.0], 1.0, self.channel_resolution.clone());
         let draw = Draw {
             target,
             // 삼각형이 전부 덮으므로 이전 내용은 필요 없다.
@@ -466,6 +492,7 @@ mod tests {
                 .parse()
                 .unwrap();
         let c = parse_inputs(Some(&t), &DEFAULTS, None).unwrap();
+        assert_eq!(c.len(), SHADERTOY_CHANNELS);
         assert_eq!(c[0].as_ref().unwrap().sampling, DEFAULTS);
         assert!(c[1].is_none());
         let b = c[2].as_ref().unwrap();
@@ -483,7 +510,9 @@ mod tests {
         );
 
         for (bad, why) in [
-            ("iChannel4 = \"a.png\"", "iChannel4"),
+            ("iChannel01 = \"a.png\"", "iChannel01"),
+            ("iChannelX = \"a.png\"", "iChannelX"),
+            ("channel0 = \"a.png\"", "channel0"),
             ("iChannel0 = { wrap = \"clamp\" }", "source"),
             (
                 "iChannel0 = { source = \"a\", wrap = \"spin\" }",
@@ -495,5 +524,22 @@ mod tests {
             let e = parse_inputs(Some(&t), &DEFAULTS, None).expect_err(bad);
             assert!(format!("{e:#}").contains(why), "{bad}: {e:#}");
         }
+    }
+
+    /// 채널 수 = max(4, 쓴 가장 큰 번호 + 1). 중간에 비운 채널은 `None`.
+    #[test]
+    fn channel_count_follows_highest_input() {
+        assert_eq!(
+            parse_inputs(None, &DEFAULTS, None).unwrap().len(),
+            SHADERTOY_CHANNELS
+        );
+        let t: Table = "iChannel0 = \"a.png\"\niChannel9 = \"b.png\""
+            .parse()
+            .unwrap();
+        let c = parse_inputs(Some(&t), &DEFAULTS, None).unwrap();
+        assert_eq!(c.len(), 10);
+        assert!(c[1..9].iter().all(Option::is_none));
+        assert_eq!(c[9].as_ref().unwrap().source, "b.png");
+        assert_eq!(channel_name(9), "iChannel9");
     }
 }

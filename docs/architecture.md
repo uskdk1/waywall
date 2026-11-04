@@ -119,9 +119,10 @@ playbin3 (file:// URI)
 - 분수 스케일·`render_scale`: swapchain을 `물리 픽셀 × render_scale` 크기로 만들고 viewporter destination을 논리 크기로 설정.
   확대는 컴포지터가 하므로 업스케일 패스가 필요 없음
 - 셰이더 컴파일(naga 파싱·검증, 파이프라인 생성)은 메인 스레드에서 동기적으로 함. 오류는 `set` 응답과 `list`에 표시
-- 채널 수: 지금은 4 고정(`backend/shader.rs` `CHANNELS`). [M8b](roadmap.md#m8b--셰이더-채널-개수-제한-해제-설계)(설계)에서 셰이더마다
-  `max(4, 쓴 가장 큰 번호 + 1)`로 정하고, 프리앰블의 `// @waywall:channels` 자리에 채널 선언을 생성하며, 바인드 그룹 레이아웃도 그 수로 만든다.
-  상한은 어댑터 한도(`max_sampled_textures_per_shader_stage` · `max_samplers_per_shader_stage`)
+- 채널 수([M8b](roadmap.md#m8b--셰이더-채널-개수-제한-해제-)): 셰이더마다 `max(4, 쓴 가장 큰 번호 + 1)`. `gpu/shadertoy.rs`가 프리앰블의
+  `// waywall:channel_resolution`·`// waywall:channels` 줄을 그 수만큼의 선언으로 바꾸고, `ShaderRenderer`가 같은 수로 바인드 그룹 레이아웃을 만든다
+  (바인딩 번호는 `texture_binding`·`sampler_binding` 한 곳). 상한은 장치 한도(`max_sampled_textures_per_shader_stage` · `max_samplers_per_shader_stage`,
+  어댑터 값 그대로 요청)이고 넘으면 그 셰이더만 거절
 
 shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuView`(`backend/view.rs`) 하나로 공유하고,
 "한 장 그리기"만 렌더러(`Shadertoy` / `Scene`)가 다릅니다.

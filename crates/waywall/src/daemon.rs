@@ -601,20 +601,27 @@ impl State {
                 let source = std::fs::read_to_string(path)
                     .with_context(|| format!("failed to read {}", path.display()))?;
                 let lang = Language::from_path(path);
-                let compiled = shadertoy::compile(&self.assets(), lang, &source, &props, &wp.name)?;
                 let user = self
                     .layers
                     .user_type_section(wp.kind, shader::CHANNEL_SECTION);
                 let defs = shader::parse_inputs(wp.inputs.as_ref(), &opts.channel, user)?;
+                let compiled = shadertoy::compile(
+                    &self.assets(),
+                    lang,
+                    &source,
+                    &props,
+                    defs.len(),
+                    &wp.name,
+                )?;
                 let base = path.parent().unwrap_or(std::path::Path::new("."));
-                let mut channels: [Option<Texture>; shader::CHANNELS] = Default::default();
-                let mut sampling = [opts.channel; shader::CHANNELS];
+                let mut channels: Vec<Option<Texture>> = defs.iter().map(|_| None).collect();
+                let mut sampling = vec![opts.channel; defs.len()];
                 for (i, def) in defs.into_iter().enumerate() {
                     if let Some(def) = def {
                         let file = base.join(&def.source);
                         channels[i] =
                             Some(shader::decode_channel(&file, lang).with_context(|| {
-                                format!("inputs.{}: {}", shader::CHANNEL_NAMES[i], file.display())
+                                format!("inputs.{}: {}", shader::channel_name(i), file.display())
                             })?);
                         sampling[i] = def.sampling;
                     }

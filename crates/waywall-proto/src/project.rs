@@ -9,7 +9,7 @@ pub struct Project {
     /// 타입별 옵션. 키 검증은 타입 옵션으로 병합할 때 한다.
     pub options: Option<toml::Table>,
     pub properties: Option<toml::Table>,
-    /// shader 배경의 텍스처 채널 (docs/wallpaper-format.md#텍스처-입력-ichannel0ichannel3).
+    /// shader 배경의 텍스처 채널 (docs/wallpaper-format.md#텍스처-입력-ichanneln).
     pub inputs: Option<toml::Table>,
 }
 

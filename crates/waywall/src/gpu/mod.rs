@@ -69,6 +69,13 @@ impl Gpu {
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             // render.hdr_format의 선택지가 쓰는 기능. reload로 바뀔 수 있으니 지원하면 미리 켠다.
             required_features: adapter.features() & HDR_FEATURES,
+            // 셰이더 채널 수의 상한은 하드웨어 한도 그대로 (docs/wallpaper-format.md#텍스처-입력-ichanneln).
+            required_limits: wgpu::Limits {
+                max_sampled_textures_per_shader_stage:
+                    adapter.limits().max_sampled_textures_per_shader_stage,
+                max_samplers_per_shader_stage: adapter.limits().max_samplers_per_shader_stage,
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .context("failed to create GPU device")?;
