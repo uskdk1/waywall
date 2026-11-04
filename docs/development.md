@@ -104,24 +104,19 @@ Nix로 빌드한 프로그램은 시스템의 Vulkan ICD/VA-API 드라이버(`/u
   nix run --impure github:nix-community/nixGL#nixVulkanIntel -- ./result/bin/waywall daemon
   ```
 
-## Live2D Cubism Core (설계, M9)
+## Live2D: PurismCore (설계, M9)
 
-[M9b](roadmap.md#m9--live2d-레이어-설계)의 방침입니다. waywall은 Cubism Core C ABI 하나만 씁니다.
+[M9b](roadmap.md#m9--live2d-레이어-설계)의 방침입니다. **라이선스 허가가 필요한 의존은 최대한 쓰지 않습니다.**
 
-- **기본: PurismCore.** [SakuraMotion/PurismCore](https://github.com/SakuraMotion/PurismCore)(MIT, C99)는 Cubism Core를 API·ABI 그대로 대신하는
-  오픈소스 재구현입니다. flake 입력(태그 커밋 고정)으로 받아 Nix에서 빌드하고 데몬에 링크하므로 사용자가 따로 받을 파일이 없습니다.
-  ABI는 v6(Core 6.0, Purism 기본값)을 씁니다.
-- **선택: 공식 Cubism Core.** 독점 라이선스(Live2D Proprietary Software License)이고 Live2D 사이트에서 약관에 동의해야 받을 수 있어
-  **저장소·flake 입력·Nix 패키지에 넣지 않습니다.** 사용자가 config [`[live2d] core`](config.md#live2d-설계-m9)에 경로를 적으면 데몬이 그 라이브러리를
-  실행 중에 `dlopen`해 PurismCore 대신 씁니다(같은 ABI라 호출 코드는 하나).
-- `nix build`와 `nix flake check`는 공식 Core 없이 통과해야 합니다.
-- 공식 Core를 쓸 때의 배포 라이선스: 개인·소규모 사업자(연 매출 1천만 엔 미만)는 면제지만 "확장 가능한 앱"은 예외입니다.
-  waywall은 공식 Core를 배포하지 않고 사용자가 받은 파일을 읽기만 합니다.
+- [SakuraMotion/PurismCore](https://github.com/SakuraMotion/PurismCore)(MIT, C99)는 Cubism Core를 API·ABI 그대로 대신하는
+  오픈소스 재구현입니다. flake 입력(태그 커밋 고정)으로 받아 Nix에서 빌드하고 데몬에 정적 링크하므로 사용자가 따로 받을 파일이 없습니다.
+  ABI는 v6(Core 6.0, Purism 기본값)을 씁니다. 의존은 libc·libm뿐입니다.
+- 공식 Cubism Core(독점 라이선스, Live2D 사이트에서 약관 동의 후 다운로드)는 쓰지 않으며, 바꿔 끼우는 경로도 두지 않습니다.
 - mocari(순수 Rust)는 제작자가 행방불명되어 취소했습니다([roadmap.md](roadmap.md#m9--live2d-레이어-설계)).
 
-## Spine 런타임 (설계, M11)
+## Spine 런타임 (보류, M11)
 
-[M11](roadmap.md#m11--spine-레이어-설계)의 방침입니다.
+[M11](roadmap.md#m11--spine-레이어-보류)의 방침입니다. **M11은 보류** — 아래 라이선스 조건이 라이선스 허가가 필요한 의존을 피한다는 방침과 맞지 않습니다.
 
 - `spine-c`(4.2)는 GitHub에 소스가 공개되어 있으므로 flake 입력(커밋 고정)으로 받아 Nix에서 빌드합니다. Cubism Core와 달리
   사용자가 따로 받을 파일이 없습니다.

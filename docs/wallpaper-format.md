@@ -621,7 +621,7 @@ blend = "screen"
 
 ### 캐릭터 레이어 (live2d · vrm · spine, 설계)
 
-> **설계 단계, 아직 구현되지 않음.** 쓰면 이유와 함께 거절됩니다. 계획은 [roadmap.md](roadmap.md#m9--live2d-레이어-설계)의 M9(Live2D)·M10(VRM)·M11(Spine).
+> **설계 단계, 아직 구현되지 않음.** 쓰면 이유와 함께 거절됩니다. 계획은 [roadmap.md](roadmap.md#m9--live2d-레이어-설계)의 M9(Live2D)·M10(VRM)·M11(Spine, 보류).
 > 필드 이름과 구성은 구현하며 바뀔 수 있습니다.
 
 리깅된 캐릭터 모델을 레이어로 띄웁니다. `live2d`는 일러스트가 그대로 움직이는 2D 모델(`.moc3`), `vrm`은 3D 툰 모델(`.vrm`),
@@ -693,8 +693,7 @@ on_click = { "drawable:ArtMesh54" = "TapHead", "*" = "Tap" }  # 특정 drawable�
 | `parameters` | 파라미터 이름 → 고정값. 모션보다 나중에 적용. `"$속성"` 사용 가능 |
 | `expression` | 처음부터 켜 둘 표정 이름(`model3.json` Expressions). 생략하면 없음 |
 
-런타임은 waywall에 들어 있는 PurismCore(Cubism Core 호환 오픈소스 재구현)이며, 공식 Cubism Core를 쓰려면
-config [`[live2d] core`](config.md#live2d-설계-m9)에 그 라이브러리 경로를 적습니다(M9b).
+런타임은 waywall에 들어 있는 PurismCore(Cubism Core 호환 오픈소스 재구현, MIT)입니다(M9b). 읽지 못하는 모델은 이유와 함께 거절됩니다.
 
 #### vrm
 
@@ -764,8 +763,7 @@ blink    = { animation = "blink" }
 | `blink` | 공통 필드 + `animation`(눈 깜빡임 애니메이션 이름). 위 트랙에서 `interval`마다 재생 |
 | `physics` | 물리 제약(4.2) 적용 `{ enabled, wind, gravity }`. `wind`·`gravity`는 스켈레톤 좌표 `[x, y]` |
 
-Spine 런타임 라이선스 때문에 기본 빌드에는 들어 있지 않을 수 있습니다([roadmap.md](roadmap.md#m11--spine-레이어-설계) M11).
-빠진 빌드에서는 `spine` 레이어가 이유와 함께 거절됩니다.
+**보류:** Spine 런타임은 라이선스 허가가 필요해 M11이 보류되었습니다([roadmap.md](roadmap.md#m11--spine-레이어-보류)). 지금은 `spine` 레이어를 쓰면 이유와 함께 거절됩니다.
 
 #### 빛 가리기 (빛줄기와 캐릭터·레이어)
 
