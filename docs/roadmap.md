@@ -205,6 +205,23 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 **완료 기준:** 기존 예제(ripple, sunlight, character)가 그대로 동작하고 Shadertoy 셰이더가 수정 없이 컴파일됨. 광원 1 + 가림 레이어 4개 이상을
 입력으로 받는 빛줄기 셰이더가 각 레이어의 투명한 곳으로만 빛을 통과시킴([빛 가리기](wallpaper-format.md#빛-가리기-빛줄기와-캐릭터레이어)).
 
+## M8c — 셰이더 잠들기 (설계)
+지금은 셰이더 배경·shader 레이어·셰이더 효과가 있으면 항상 계속 그린다. 그래서 포인터에만 반응하는 셰이더(커서 아래만 다른 그림이
+보이는 렌즈 등)도 커서가 멈춰 있는 동안 1080p 두 출력을 매 프레임 다시 그려 화면 전체가 버벅였다(2026-11-05, Iris Xe. 같은 효과를
+`clip` + `follow`로 바꾸자 멈춰 있을 때 CPU 약 2%). 형식은 [wallpaper-format.md](wallpaper-format.md#잠들기-animate).
+
+- **자동 판정:** 컴파일 때 naga 모듈의 모든 함수에서 uniform 전역의 시간 멤버(`iTime`·`iTimeDelta`·`iFrame`·`iFrameRate`·`iDate`,
+  WGSL은 `time`·`time_delta`·`frame`·`frame_rate`·`date`)를 읽는 `AccessIndex`가 있는지 본다. 멤버는 이름으로 찾는다(프리앰블 교체 대비).
+  uniform 전체를 `Load`하는 등 멤버를 가릴 수 없으면 "시간을 읽음"으로 본다
+- 시간을 안 읽는 셰이더: 셰이더 배경은 입력 사건(포인터·버튼·클릭·크기·속성)이 있을 때만 frame을 요청, 씬에서는 레이어·효과가
+  "움직이는 것"에서 빠지고 씬이 그릴 때 같이 그림. `iMouse.w` 때문에 버튼을 누른 뒤 한 프레임 더
+- 작성자 힌트 `animate = { click, pointer, start }`: 그 사건 뒤 적은 초 동안만 계속 그림. `"always"`로 강제, 사용자 `[types.*] animate`가 우선
+- 내장값 `animate = "auto"`를 `assets/defaults.toml`의 `[types.shader]`·`[types.scene.shader]`·`[types.scene.effects.sway]`에 둔다
+
+**완료 기준:** `iTime`을 읽지 않는 렌즈 셰이더(포인터 + 그림 두 장)가 커서가 멈추면 잠들어 CPU·GPU가 정적 이미지 수준이고,
+커서를 움직이면 바로 따라감. `iTime`을 읽는 기존 예제(pointer-glow, sunlight, ripple 등)는 그대로 계속 그림.
+`animate = { click = 0.7 }`인 클릭 파문 셰이더가 클릭 후 0.7초 뒤 잠듦. 판정 단위 테스트(GLSL·WGSL, 선언만 있는 경우, 함수 인자로 넘긴 경우).
+
 ## M9 — Live2D 레이어 ✅
 캐릭터 일러스트가 그대로 움직이는 2D 리깅 모델을 씬 레이어로 띄운다. 형식 설계는
 [wallpaper-format.md](wallpaper-format.md#캐릭터-레이어-live2d--vrm--spine).

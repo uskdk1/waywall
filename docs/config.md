@@ -269,6 +269,8 @@ fps = 0
 render_scale = 1.0
 interactive = true
 background = "#000000"     # 첫 프레임이 그려지기 전에 보이는 색
+# animate = "auto"         # 설계(M8c): 시간을 읽을 때만 계속 그림 | "always" | { click, pointer, start }
+                           # 적으면 배경의 값보다 우선 (wallpaper-format.md#잠들기-animate)
 
 [types.shader.channel]     # [inputs] 채널에서 생략한 값 (사용자가 적으면 배경의 값보다 우선)
 filter = "linear"          # linear | nearest
@@ -324,6 +326,7 @@ max_step   = 0.1          # 한 프레임 시뮬레이션의 최대 dt(초)
 [types.scene.shader]       # shader 레이어 필드
 channel = { filter = "linear", wrap = "clamp" }
 render_scale = 1.0
+# animate = "auto"         # 설계(M8c): [types.shader]와 같음. 레이어 효과는 [types.scene.effects.<type>] animate
 
 [types.scene.live2d]       # live2d 레이어 필드 (docs/wallpaper-format.md#live2d)
 scale        = 1.0          # 모델 캔버스 px → 설계 px
