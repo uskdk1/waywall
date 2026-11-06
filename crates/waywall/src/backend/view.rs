@@ -254,12 +254,9 @@ impl GpuView {
         (next > now).then_some(next)
     }
 
-    /// frame 콜백을 받으면 다음 장을 그려야 하는지. 셰이더는 항상, 씬은 움직이는 동안만.
+    /// frame 콜백을 받으면 다음 장을 그려야 하는지 (렌더러가 직전 프레임에서 "아직 움직이는 중"이라고 했는지).
     pub fn wants_frames(&self) -> bool {
-        match &self.renderer {
-            Renderer::Shader(_) => true,
-            Renderer::Scene(_) => self.animating,
-        }
+        self.animating
     }
 
     /// 마지막 호출 이후 평균 fps를 돌려주고 측정을 새로 시작한다.
@@ -353,7 +350,7 @@ impl GpuView {
         self.animating = match &mut self.renderer {
             Renderer::Shader(r) => {
                 r.render(gpu, &mut encoder, &view, &info, &self.name);
-                true
+                r.activity.moving(&info)
             }
             Renderer::Scene(r) => r.render(gpu, &mut encoder, &view, &info),
         };
@@ -412,8 +409,12 @@ impl GpuView {
             }
             PointerEventKind::Axis { .. } => return false,
         }
+        p.last_event = Some(time);
         match &self.renderer {
-            Renderer::Shader(_) => true,
+            Renderer::Shader(r) => {
+                r.activity.follows_pointer()
+                    || matches!(kind, PointerEventKind::Press { .. } if r.activity.wants_clicks())
+            }
             Renderer::Scene(s) => {
                 s.follows_pointer()
                     || matches!(kind, PointerEventKind::Press { button, .. }
@@ -478,9 +479,21 @@ pub struct Pointer {
     pub click: [f32; 4],
     /// 왼쪽 버튼을 누른 횟수 (wrapping). 위치는 `mouse.zw`의 절댓값.
     pub presses: u32,
+    /// 마지막 포인터 사건(들어옴·나감·이동·버튼)의 배경 시계 시각.
+    pub last_event: Option<f32>,
 }
 
 impl Pointer {
+    /// 마지막 클릭의 배경 시계 시각 (`iClick.z`). 클릭 전에는 `None`.
+    pub fn clicked_at(&self) -> Option<f32> {
+        (self.click[3] > 0.0).then_some(self.click[2])
+    }
+
+    /// 왼쪽 버튼을 누른 뒤 아직 한 번도 그리지 않았는지 (`iMouse.w > 0`).
+    pub fn first_press_frame(&self) -> bool {
+        self.mouse[3] > 0.0
+    }
+
     fn motion(&mut self, x: f32, y: f32) {
         self.pos = [x, y];
         if self.buttons & MOUSE_BUTTON_BIT != 0 {

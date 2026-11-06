@@ -653,8 +653,10 @@ impl SceneRenderer {
     pub fn follows_pointer(&self) -> bool {
         self.max_parallax > 0.0
             || self.layers.iter().any(|l| match l {
-                DrawLayer::Image(l) => l.follow.is_some(),
-                DrawLayer::Shader(s) => s.quad.follow.is_some(),
+                DrawLayer::Image(l) => {
+                    l.follow.is_some() || l.effects.as_ref().is_some_and(|e| e.follows_pointer())
+                }
+                DrawLayer::Shader(s) => s.quad.follow.is_some() || s.activity.follows_pointer(),
                 DrawLayer::Live2d(l) => l.follows_pointer(),
                 DrawLayer::Particles(_) => false,
             })
@@ -674,7 +676,8 @@ impl SceneRenderer {
         self.layers.iter().any(|l| match l {
             DrawLayer::Particles(p) => p.wants_clicks(),
             DrawLayer::Live2d(l) => l.wants_clicks(),
-            _ => false,
+            DrawLayer::Shader(s) => s.activity.wants_clicks(),
+            DrawLayer::Image(l) => l.effects.as_ref().is_some_and(|e| e.wants_clicks()),
         })
     }
 
@@ -758,14 +761,14 @@ impl SceneRenderer {
             match l {
                 DrawLayer::Image(l) => {
                     moving |= follow(l);
-                    moving |= l.effects.is_some();
+                    moving |= l.effects.as_ref().is_some_and(|e| e.moving(f));
                     l.write_uniform(gpu, &map, shift);
                 }
                 DrawLayer::Shader(s) => {
-                    follow(&mut s.quad);
+                    moving |= follow(&mut s.quad);
                     s.quad.write_uniform(gpu, &map, shift);
-                    // 셰이더는 시간에 따라 변한다.
-                    moving = true;
+                    // 시간을 읽는 셰이더만 씬을 깨워 둔다 (docs/wallpaper-format.md#잠들기-animate).
+                    moving |= s.activity.moving(f);
                 }
                 DrawLayer::Live2d(l) => {
                     l.quad.write_uniform(gpu, &map, shift);

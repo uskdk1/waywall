@@ -13,9 +13,9 @@ use toml::{Table, Value};
 use waywall_proto::Color;
 use waywall_proto::color::{linear_to_srgb, srgb_to_linear};
 use waywall_proto::config::{
-    Blend, ChannelDefaults, Emitter, EmitterShape, Live2dBlink, Live2dBreath, Live2dLookAt,
-    Live2dPhysics, OnLeave, ParticlePointer, PointerMode, Ramp, Scale, SceneOptions, Span,
-    Turbulence, VelocityRange,
+    Animate, Blend, ChannelDefaults, Emitter, EmitterShape, Live2dBlink, Live2dBreath,
+    Live2dLookAt, Live2dPhysics, OnLeave, ParticlePointer, PointerMode, Ramp, Scale, SceneOptions,
+    Span, Turbulence, VelocityRange,
 };
 use waywall_proto::project::WallpaperKind;
 
@@ -78,6 +78,8 @@ const EFFECT_MASK_SHADER: &str = "shaders/scene/effect_mask.wgsl";
 const EFFECT_SHADER: &str = "shader";
 /// 효과 파일의 엔트리 (인터페이스).
 const EFFECT_ENTRY: &str = "fs_main";
+/// 셰이더를 언제 계속 그릴지 (shader 레이어 필드, 효과 필드).
+const ANIMATE: &str = "animate";
 /// 효과 파일 uniform 중 waywall이 채우는 멤버 (docs/wallpaper-format.md#레이어-효과-effects).
 const EFFECT_BUILTINS: [&str; 3] = ["time", "size", "resolution"];
 
@@ -120,6 +122,7 @@ struct ShaderLayerDef {
     /// 채널에서 생략한 filter·wrap.
     channel: ChannelDefaults,
     render_scale: f64,
+    animate: Animate,
     clip: Option<String>,
     follow: Option<Table>,
 }
@@ -485,6 +488,7 @@ pub fn load(
                     inputs,
                     sampling,
                     render_scale: d.render_scale,
+                    animate: d.animate,
                     direct: d.opacity == 1.0
                         && d.render_scale == 1.0
                         && d.clip.is_none()
@@ -1145,8 +1149,9 @@ fn effect_spec(
         }
         Some(_) => bail!("`mask` must be a path"),
     };
+    let animate = effect_animate(&kind, raw.remove(ANIMATE), opts, layers)?;
     if kind == EFFECT_SHADER {
-        return shader_effect(raw, mask, base, opts, layers, assets, props);
+        return shader_effect(raw, mask, animate, base, opts, layers, assets, props);
     }
     let valid = !kind.is_empty()
         && kind
@@ -1180,6 +1185,8 @@ fn effect_spec(
     {
         merge(&mut t, u);
     }
+    // animate는 uniform 멤버가 아니다 (위에서 따로 읽음).
+    t.remove(ANIMATE);
     let members: Vec<&str> = layout.member_names().collect();
     let mut values = HashMap::new();
     for (key, value) in t {
@@ -1206,9 +1213,36 @@ fn effect_spec(
             module,
             layout,
             values,
+            animate,
         },
         mask,
     })
+}
+
+/// 효과의 `animate`: 사용자 `[types.scene.effects.<type>]` > 효과 표 > 내장 `[types.scene.effects.<type>]`
+/// > `[types.scene.shader]` (docs/wallpaper-format.md#잠들기-animate).
+fn effect_animate(
+    kind: &str,
+    own: Option<Value>,
+    opts: &SceneOptions,
+    layers: &Layers,
+) -> Result<Animate> {
+    let section = |t: Option<&Value>| {
+        t.and_then(Value::as_table)
+            .and_then(|t| t.get(ANIMATE))
+            .cloned()
+    };
+    let user = section(
+        layers
+            .user_type_section(WallpaperKind::Scene, EFFECTS_SECTION)
+            .and_then(|e| e.get(kind)),
+    );
+    match user.or(own).or_else(|| section(opts.effects.get(kind))) {
+        Some(v) => v
+            .try_into()
+            .context("`animate` must be \"auto\", \"always\" or { click, pointer, start }"),
+        None => Ok(opts.shader.animate),
+    }
 }
 
 /// `type = "shader"` 효과: Shadertoy 형식, iChannel0 = 효과를 적용할 이미지, iChannel1–3 = 이미지 경로.
@@ -1216,6 +1250,7 @@ fn effect_spec(
 fn shader_effect(
     mut raw: Table,
     mask: Option<Texture>,
+    animate: Animate,
     base: &Path,
     opts: &SceneOptions,
     layers: &Layers,
@@ -1232,7 +1267,7 @@ fn shader_effect(
         Some(_) => bail!("`inputs` must be a table"),
     };
     if let Some(k) = raw.keys().next() {
-        bail!("unknown field `{k}` (source | inputs | mask)");
+        bail!("unknown field `{k}` (source | inputs | mask | animate)");
     }
     let path = base.join(&source);
     let text = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
@@ -1272,6 +1307,7 @@ fn shader_effect(
             lang,
             channels,
             sampling,
+            animate,
         },
         mask,
     })
@@ -1799,5 +1835,83 @@ mod tests {
             asset_text(&assets, &o.particles.sprite).unwrap()
         );
         compile_wgsl(PARTICLE_SHADER, &src).unwrap();
+    }
+
+    /// docs/wallpaper-format.md#잠들기-animate
+    #[test]
+    fn animate_fields() {
+        use waywall_proto::config::{AnimateMode, AnimateWindows};
+        let auto = Animate::Mode(AnimateMode::Auto);
+        let l = Layers::load_for_test("");
+        let o = scene_opts(&l);
+        assert_eq!(o.shader.animate, auto, "built-in default");
+        let shader = |extra: &str, l: &Layers| {
+            let raw = format!("type = \"shader\"\nsource = \"a.glsl\"\n{extra}");
+            match layer_def(0, raw.parse().unwrap(), &scene_opts(l), None, l) {
+                Ok(LayerDef::Shader(d)) => Ok(d.animate),
+                Ok(_) => panic!("not a shader layer"),
+                Err(e) => Err(format!("{e:#}")),
+            }
+        };
+        assert_eq!(shader("", &l), Ok(auto));
+        assert_eq!(
+            shader("animate = { click = 0.7 }", &l),
+            Ok(Animate::Windows(AnimateWindows {
+                click: 0.7,
+                ..Default::default()
+            }))
+        );
+        assert_eq!(
+            shader("animate = {}", &l),
+            Ok(Animate::Windows(AnimateWindows::default()))
+        );
+        assert!(shader("animate = \"sometimes\"", &l).is_err());
+        assert!(shader("animate = { hover = 1 }", &l).is_err());
+        // 사용자가 [types.scene.shader]에 적으면 배경의 값보다 우선.
+        let user = Layers::load_for_test("[types.scene.shader]\nanimate = \"always\"");
+        assert_eq!(
+            shader("animate = {}", &user),
+            Ok(Animate::Mode(AnimateMode::Always))
+        );
+
+        // 효과: 사용자 섹션 > 효과 표 > 내장 섹션 > [types.scene.shader].
+        let assets = Assets::new(std::path::PathBuf::from("/nonexistent"));
+        let effect = |raw: &str, l: &Layers| {
+            let e = effect_spec(
+                raw.parse().unwrap(),
+                Path::new("/"),
+                &scene_opts(l),
+                l,
+                &assets,
+                &[],
+            )
+            .unwrap_or_else(|e| panic!("{e:#}"));
+            match e.kind {
+                EffectKind::Builtin { animate, .. } | EffectKind::Shader { animate, .. } => animate,
+            }
+        };
+        assert_eq!(effect("type = \"sway\"", &l), auto);
+        let windows = Animate::Windows(AnimateWindows {
+            pointer: 0.5,
+            ..Default::default()
+        });
+        assert_eq!(
+            effect("type = \"sway\"\nanimate = { pointer = 0.5 }", &l),
+            windows
+        );
+        let user = Layers::load_for_test("[types.scene.effects.sway]\nanimate = \"always\"");
+        assert_eq!(
+            effect("type = \"sway\"\nanimate = { pointer = 0.5 }", &user),
+            Animate::Mode(AnimateMode::Always)
+        );
+        let bad = effect_spec(
+            "type = \"sway\"\nanimate = 3".parse().unwrap(),
+            Path::new("/"),
+            &o,
+            &l,
+            &assets,
+            &[],
+        );
+        assert!(bad.is_err());
     }
 }

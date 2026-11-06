@@ -75,6 +75,7 @@ fps          = 0             # 0 = frame 콜백마다 (render.max_fps가 상한)
 render_scale = 1.0
 interactive  = true
 background   = "#000000"     # 첫 프레임 전에 보이는 색
+animate      = "auto"        # 시간 uniform을 읽을 때만 계속 그림 | "always" | { click, pointer, start } (초)
 
 [types.shader.channel]       # [inputs] 채널에서 생략한 값
 filter = "linear"            # linear | nearest
@@ -125,6 +126,7 @@ max_step   = 0.1             # 한 프레임 시뮬레이션의 최대 dt(초)
 [types.scene.shader]
 channel = { filter = "linear", wrap = "clamp" }   # inputs 채널에서 생략한 값
 render_scale = 1.0           # 이 레이어를 그리는 해상도 배율 (rect의 렌더 크기 × 이 값)
+animate      = "auto"        # [types.shader]와 같음. 효과 섹션에 animate가 없으면 효과도 이 값
 
 [types.scene.live2d]
 scale        = 1.0           # 모델 캔버스 px → 설계 px 배율
@@ -161,6 +163,7 @@ strength  = 4.0              # 설계 px (마스크 흰색일 때)
 speed     = 0.6              # 흔들림이 바뀌는 빠르기
 scale     = 0.01             # 노이즈 주파수 (1/px), 작을수록 넓게 함께 움직임
 direction = [1.0, 0.0]
+animate   = "auto"
 
 [types.scene.follow]         # follow에서 생략한 필드
 range     = 600.0            # 설계 px, 이 거리부터 최대 이동

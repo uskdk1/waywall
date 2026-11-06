@@ -17,8 +17,8 @@ pub use load::load;
 pub use render::{SceneRenderer, upload_texture};
 use waywall_proto::Color;
 use waywall_proto::config::{
-    Blend, Bloom, ChannelDefaults, EmitterShape, Fit, Live2dBlink, Live2dBreathParam, OnLeave,
-    ParticlePointer, Turbulence, VelocityRange,
+    Animate, Blend, Bloom, ChannelDefaults, EmitterShape, Fit, Live2dBlink, Live2dBreathParam,
+    OnLeave, ParticlePointer, Turbulence, VelocityRange,
 };
 
 use crate::gpu::shadertoy::{Compiled, Language, UniformLayout};
@@ -143,6 +143,7 @@ pub struct ShaderLayer {
     pub sampling: Vec<ChannelDefaults>,
     /// 그리는 해상도 배율.
     pub render_scale: f64,
+    pub animate: Animate,
     pub clip: Option<usize>,
     pub follow: Option<Follow>,
     /// HDR 버퍼에 직접 그린다: `opacity = 1`, `render_scale = 1`이고 다른 레이어의 입력이 아님 (docs/architecture.md#씬-렌더러).
@@ -242,6 +243,7 @@ pub enum EffectKind {
         module: naga::Module,
         layout: UniformLayout,
         values: HashMap<String, Vec<f32>>,
+        animate: Animate,
     },
     /// Shadertoy 형식. `channels[0]`은 비어 있고 효과를 적용할 이미지가 들어간다.
     Shader {
@@ -250,6 +252,7 @@ pub enum EffectKind {
         lang: Language,
         channels: Vec<Option<Texture>>,
         sampling: Vec<ChannelDefaults>,
+        animate: Animate,
     },
 }
 

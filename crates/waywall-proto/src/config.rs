@@ -207,6 +207,34 @@ pub struct ShaderOptions {
     pub background: Color,
     /// `[inputs]` 채널에서 생략한 값.
     pub channel: ChannelDefaults,
+    /// 언제 계속 그릴지 (docs/wallpaper-format.md#잠들기-animate).
+    pub animate: Animate,
+}
+
+/// 셰이더를 언제 계속 그릴지 (docs/wallpaper-format.md#잠들기-animate).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Animate {
+    Mode(AnimateMode),
+    Windows(AnimateWindows),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnimateMode {
+    /// 시간 uniform을 읽을 때만 계속 그림.
+    Auto,
+    /// 항상 계속 그림.
+    Always,
+}
+
+/// 사건 뒤 계속 그리는 시간(초). 생략한 키는 0 = 그 사건으로는 계속 그리지 않음.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AnimateWindows {
+    pub click: f64,
+    pub pointer: f64,
+    pub start: f64,
 }
 
 /// 텍스처 채널의 샘플링 (docs/wallpaper-format.md#텍스처-입력-ichanneln).
@@ -311,6 +339,7 @@ pub struct SceneImageDefaults {
 pub struct SceneShaderDefaults {
     pub channel: ChannelDefaults,
     pub render_scale: f64,
+    pub animate: Animate,
 }
 
 /// live2d 레이어 필드 (docs/wallpaper-format.md#live2d).

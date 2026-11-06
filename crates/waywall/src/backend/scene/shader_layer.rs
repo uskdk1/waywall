@@ -12,7 +12,7 @@ use super::render::{
     upload_texture,
 };
 use super::{ChannelInput, ShaderLayer};
-use crate::backend::shader::{Draw, ShaderRenderer, empty_texture, frame_inputs};
+use crate::backend::shader::{Activity, Draw, ShaderRenderer, empty_texture, frame_inputs};
 use crate::backend::view::FrameInfo;
 use crate::gpu::shadertoy::Language;
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
@@ -223,6 +223,8 @@ enum CropSource {
 }
 
 pub struct GpuShaderLayer {
+    /// 언제 계속 그릴지 (docs/wallpaper-format.md#잠들기-animate).
+    pub activity: Activity,
     /// 텍스처 경유일 때 결과를 합성하는 사각형. 직접 그릴 때는 위치(패럴랙스)만 쓴다.
     pub quad: GpuLayer,
     id: String,
@@ -268,10 +270,12 @@ impl GpuShaderLayer {
             inputs,
             sampling,
             render_scale,
+            animate,
             direct,
             clip,
             follow,
         } = *spec;
+        let activity = Activity::new(animate, &compiled.reads);
         let (format, blend_state) = if direct {
             (hdr_format, Some(blend_state(blend)))
         } else {
@@ -326,6 +330,7 @@ impl GpuShaderLayer {
         let empty = upload_texture(gpu, d, &id, &empty_texture(), TEXTURE_FORMAT);
         let empty_view = empty.create_view(&wgpu::TextureViewDescriptor::default());
         Ok(Self {
+            activity,
             quad,
             id,
             rect,

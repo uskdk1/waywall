@@ -10,9 +10,9 @@ use waywall_proto::config::ChannelDefaults;
 use super::render::{TEXTURE_FORMAT, upload_texture};
 use super::shader_layer::{Cropper, OUTPUT_FORMAT, Target};
 use super::{EffectKind, EffectSpec, Texture};
-use crate::backend::shader::{Draw, ShaderRenderer, empty_texture, frame_inputs};
+use crate::backend::shader::{Activity, Draw, ShaderRenderer, empty_texture, frame_inputs};
 use crate::backend::view::FrameInfo;
-use crate::gpu::shadertoy::{Language, UniformLayout};
+use crate::gpu::shadertoy::{Language, UniformLayout, UniformReads};
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
 
 /// 효과 파일·`scene/effect_mask.wgsl`의 엔트리 (인터페이스).
@@ -152,6 +152,8 @@ enum Step {
 
 pub struct GpuEffects {
     steps: Vec<Step>,
+    /// 효과마다 언제 계속 그릴지 (`steps`와 같은 순서).
+    activities: Vec<Activity>,
     /// 번갈아 쓰는 결과 텍스처. 효과 i는 `targets[i % 2]`에 쓴다.
     targets: [Target; 2],
     /// 레이어의 화면 크기 (설계 px).
@@ -179,6 +181,7 @@ impl GpuEffects {
             Target::new(d, label, OUTPUT_FORMAT, resolution),
         ];
         let mut steps = Vec::with_capacity(specs.len());
+        let mut activities = Vec::with_capacity(specs.len());
         let mut masks = Vec::new();
         for (i, spec) in specs.into_iter().enumerate() {
             let input = if i == 0 {
@@ -205,7 +208,9 @@ impl GpuEffects {
                     module,
                     layout,
                     values,
+                    animate,
                 } => {
+                    activities.push(Activity::new(animate, &UniformReads::from_module(&module)));
                     let module = gpu.create_module(&name, module)?;
                     let uniforms = d.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&name),
@@ -249,32 +254,50 @@ impl GpuEffects {
                     lang,
                     channels,
                     sampling,
-                } => shader_step(
-                    gpu,
-                    d,
-                    shared,
-                    cropper,
-                    ShaderStep {
-                        compiled,
-                        props,
-                        lang,
-                        channels,
-                        sampling,
-                    },
-                    input,
-                    &mask_view,
-                    resolution,
-                    label,
-                )?,
+                    animate,
+                } => {
+                    activities.push(Activity::new(animate, &compiled.reads));
+                    shader_step(
+                        gpu,
+                        d,
+                        shared,
+                        cropper,
+                        ShaderStep {
+                            compiled,
+                            props,
+                            lang,
+                            channels,
+                            sampling,
+                        },
+                        input,
+                        &mask_view,
+                        resolution,
+                        label,
+                    )?
+                }
             });
         }
         Ok(Self {
             steps,
+            activities,
             targets,
             size,
             resolution,
             _masks: masks,
         })
+    }
+
+    /// 이 프레임 다음에도 효과를 다시 그려야 하는지 (docs/wallpaper-format.md#잠들기-animate).
+    pub fn moving(&self, f: &FrameInfo<'_>) -> bool {
+        self.activities.iter().any(|a| a.moving(f))
+    }
+
+    pub fn follows_pointer(&self) -> bool {
+        self.activities.iter().any(Activity::follows_pointer)
+    }
+
+    pub fn wants_clicks(&self) -> bool {
+        self.activities.iter().any(Activity::wants_clicks)
     }
 
     /// 레이어 사각형이 읽을 최종 결과.

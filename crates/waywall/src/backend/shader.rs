@@ -8,14 +8,16 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{Datelike, Local, Timelike};
 use toml::{Table, Value};
-use waywall_proto::config::{ChannelDefaults, ChannelFilter, ChannelWrap};
+use waywall_proto::config::{
+    Animate, AnimateMode, AnimateWindows, ChannelDefaults, ChannelFilter, ChannelWrap,
+};
 
 use crate::backend::scene::Texture;
 use crate::backend::view::FrameInfo;
 use crate::config::merge;
 use crate::gpu::shadertoy::{
-    Compiled, Inputs, Language, SHADERTOY_CHANNELS, Slots, UniformLayout, sampler_binding,
-    texture_binding,
+    Compiled, Inputs, Language, SHADERTOY_CHANNELS, Slots, UniformLayout, UniformReads,
+    sampler_binding, texture_binding,
 };
 use crate::gpu::{FULLSCREEN_ENTRY, Gpu};
 use crate::properties::Property;
@@ -28,6 +30,59 @@ const SOURCE_KEY: &str = "source";
 pub const CHANNEL_SECTION: &str = "channel";
 /// 지정하지 않은 채널에 묶는 1×1 투명 텍스처.
 const EMPTY_TEXEL: [u8; 4] = [0; 4];
+
+/// 셰이더를 언제 계속 그릴지: `animate` 값 + 셰이더가 읽는 uniform (docs/wallpaper-format.md#잠들기-animate).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Activity {
+    /// 늘 계속 그림.
+    always: bool,
+    /// 사건 뒤 계속 그리는 시간(초).
+    windows: AnimateWindows,
+    /// 포인터·클릭 uniform을 읽음 → 포인터 사건마다 다시 그려야 함.
+    pointer: bool,
+    /// `iMouse`를 읽음 → 버튼을 누른 뒤 한 프레임 더 (`iMouse.w`가 첫 프레임에만 양수).
+    mouse: bool,
+}
+
+impl Activity {
+    pub fn new(animate: Animate, reads: &UniformReads) -> Self {
+        let (always, windows) = match animate {
+            Animate::Mode(AnimateMode::Auto) => (reads.time(), AnimateWindows::default()),
+            Animate::Mode(AnimateMode::Always) => (true, AnimateWindows::default()),
+            Animate::Windows(w) => (false, w),
+        };
+        Self {
+            always,
+            windows,
+            pointer: reads.pointer(),
+            mouse: reads.mouse(),
+        }
+    }
+
+    /// 이 프레임 다음에도 그려야 하는지.
+    pub fn moving(&self, f: &FrameInfo<'_>) -> bool {
+        let t = f64::from(f.time);
+        let p = f.pointer;
+        let within = |since: Option<f32>, window: f64| {
+            window > 0.0 && since.is_some_and(|s| t - f64::from(s) < window)
+        };
+        self.always
+            || t < self.windows.start
+            || within(p.clicked_at(), self.windows.click)
+            || within(p.last_event, self.windows.pointer)
+            || (self.mouse && p.first_press_frame())
+    }
+
+    /// 포인터가 움직이거나 버튼을 누르면 다시 그려야 하는지.
+    pub fn follows_pointer(&self) -> bool {
+        self.always || self.pointer || self.windows.pointer > 0.0
+    }
+
+    /// 클릭하면 다시 그려야 하는지.
+    pub fn wants_clicks(&self) -> bool {
+        self.follows_pointer() || self.windows.click > 0.0
+    }
+}
 
 /// `[inputs]`의 채널 하나 (병합 후).
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +169,7 @@ pub struct ShaderSpec {
     pub channels: Vec<Option<Texture>>,
     /// 채널마다 샘플링 (지정하지 않은 채널은 기본값, 쓰이지 않음).
     pub sampling: Vec<ChannelDefaults>,
+    pub animate: Animate,
 }
 
 pub struct ShaderRenderer {
@@ -399,6 +455,7 @@ pub fn empty_texture() -> Texture {
 /// 셰이더 배경: 채널 이미지는 처음에 한 번 올린다.
 pub struct ShaderBackground {
     renderer: ShaderRenderer,
+    pub activity: Activity,
     channel_resolution: Vec<[f32; 3]>,
     _textures: Vec<wgpu::Texture>,
 }
@@ -416,7 +473,9 @@ impl ShaderBackground {
             props,
             channels,
             sampling,
+            animate,
         } = spec;
+        let activity = Activity::new(animate, &compiled.reads);
         let mut channel_resolution = vec![[0.0; 3]; channels.len()];
         let mut textures = Vec::with_capacity(channels.len());
         for (i, ch) in channels.into_iter().enumerate() {
@@ -452,6 +511,7 @@ impl ShaderBackground {
         renderer.bind(gpu, &views.iter().collect::<Vec<_>>());
         Ok(Self {
             renderer,
+            activity,
             channel_resolution,
             _textures: textures,
         })
@@ -541,5 +601,91 @@ mod tests {
         assert!(c[1..9].iter().all(Option::is_none));
         assert_eq!(c[9].as_ref().unwrap().source, "b.png");
         assert_eq!(channel_name(9), "iChannel9");
+    }
+
+    fn activity(animate: Animate, src: &str) -> Activity {
+        let assets = crate::assets::Assets::new(std::path::PathBuf::from("/nonexistent"));
+        let c = crate::gpu::shadertoy::compile(
+            &assets,
+            Language::Glsl,
+            &format!("void mainImage(out vec4 c, in vec2 p) {{ {src} }}"),
+            &[],
+            SHADERTOY_CHANNELS,
+            "t",
+        )
+        .unwrap();
+        Activity::new(animate, &c.reads)
+    }
+
+    fn at(time: f32, pointer: &crate::backend::view::Pointer) -> FrameInfo<'_> {
+        FrameInfo {
+            size: (100, 100),
+            time,
+            time_delta: 0.0,
+            frame: 0,
+            pointer,
+        }
+    }
+
+    const AUTO: Animate = Animate::Mode(AnimateMode::Auto);
+
+    /// docs/wallpaper-format.md#잠들기-animate
+    #[test]
+    fn activity_sleeps_unless_time_or_window() {
+        let still = crate::backend::view::Pointer::default();
+        // 시간을 읽으면 계속, 포인터만 읽으면 잠들고 포인터 사건에 깨어남.
+        let a = activity(AUTO, "c = vec4(sin(iTime));");
+        assert!(a.moving(&at(9.0, &still)));
+        let a = activity(AUTO, "c = vec4(iPointer.x);");
+        assert!(!a.moving(&at(9.0, &still)));
+        assert!(a.follows_pointer() && a.wants_clicks());
+        // 아무 입력도 안 읽으면 포인터 사건에도 다시 그리지 않음.
+        let a = activity(AUTO, "c = vec4(1.0);");
+        assert!(!a.follows_pointer() && !a.wants_clicks());
+        assert!(
+            activity(Animate::Mode(AnimateMode::Always), "c = vec4(1.0);").moving(&at(9.0, &still))
+        );
+
+        // 창: 시간을 읽어도 사건 뒤 그 시간 동안만.
+        let w = |click, pointer, start| {
+            activity(
+                Animate::Windows(AnimateWindows {
+                    click,
+                    pointer,
+                    start,
+                }),
+                "c = vec4(iTime - iClick.z);",
+            )
+        };
+        let a = w(0.7, 0.0, 0.0);
+        assert!(!a.moving(&at(9.0, &still)), "no click yet");
+        let clicked = crate::backend::view::Pointer {
+            click: [1.0, 1.0, 5.0, 1.0],
+            ..Default::default()
+        };
+        assert!(a.moving(&at(5.5, &clicked)));
+        assert!(!a.moving(&at(5.8, &clicked)));
+        assert!(a.wants_clicks() && a.follows_pointer(), "reads iClick");
+        let moved = crate::backend::view::Pointer {
+            last_event: Some(3.0),
+            ..Default::default()
+        };
+        assert!(w(0.0, 0.5, 0.0).moving(&at(3.4, &moved)));
+        assert!(!w(0.0, 0.5, 0.0).moving(&at(3.6, &moved)));
+        assert!(
+            !w(0.0, 0.0, 0.0).moving(&at(3.4, &moved)),
+            "{{}} = only on input"
+        );
+        assert!(w(0.0, 0.0, 2.0).moving(&at(1.0, &still)));
+        assert!(!w(0.0, 0.0, 2.0).moving(&at(2.5, &still)));
+
+        // iMouse를 읽으면 누른 첫 프레임 다음에 한 장 더 (w가 음수가 된 모습).
+        let a = activity(AUTO, "c = iMouse;");
+        let pressed = crate::backend::view::Pointer {
+            mouse: [1.0, 2.0, 1.0, 2.0],
+            ..Default::default()
+        };
+        assert!(a.moving(&at(1.0, &pressed)));
+        assert!(!a.moving(&at(1.0, &still)));
     }
 }

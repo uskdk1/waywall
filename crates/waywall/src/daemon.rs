@@ -633,6 +633,7 @@ impl State {
                             props,
                             channels,
                             sampling,
+                            animate: opts.animate,
                         })),
                         opts: ViewOpts {
                             fps: opts.fps,

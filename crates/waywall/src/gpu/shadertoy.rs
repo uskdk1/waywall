@@ -5,7 +5,10 @@
 //! 그래서 프리앰블 asset을 바꿔도(멤버 순서·패딩) CPU 쪽이 따라간다.
 
 use anyhow::{Context, Result, anyhow, bail};
-use naga::{AddressSpace, Module, ScalarKind, ShaderStage, Span, TypeInner, VectorSize};
+use naga::{
+    AddressSpace, Expression, GlobalVariable, Handle, Module, ScalarKind, ShaderStage, Span,
+    TypeInner, VectorSize,
+};
 
 use crate::assets::Assets;
 use crate::properties::{PropValue, Property};
@@ -64,6 +67,8 @@ pub struct Compiled {
     pub module: Module,
     pub entry: &'static str,
     pub layout: UniformLayout,
+    /// 셰이더가 실제로 읽는 uniform (docs/wallpaper-format.md#잠들기-animate).
+    pub reads: UniformReads,
 }
 
 impl std::fmt::Debug for Compiled {
@@ -71,6 +76,7 @@ impl std::fmt::Debug for Compiled {
         f.debug_struct("Compiled")
             .field("entry", &self.entry)
             .field("layout", &self.layout)
+            .field("reads", &self.reads)
             .finish()
     }
 }
@@ -148,10 +154,12 @@ pub fn compile(
         }
     }
     let layout = UniformLayout::from_module(&module)?;
+    let reads = UniformReads::from_module(&module);
     Ok(Compiled {
         module,
         entry,
         layout,
+        reads,
     })
 }
 
@@ -318,6 +326,113 @@ fn builtin_slot(name: &str) -> Option<Slot> {
     })
 }
 
+/// 시간에 따라 바뀌는 uniform. 하나라도 읽으면 셰이더 결과가 시간에 따라 변한다.
+const TIME_SLOTS: [Slot; 5] = [
+    Slot::Time,
+    Slot::TimeDelta,
+    Slot::Frame,
+    Slot::FrameRate,
+    Slot::Date,
+];
+/// 포인터·클릭 uniform.
+const POINTER_SLOTS: [Slot; 3] = [Slot::Mouse, Slot::Pointer, Slot::Click];
+
+/// group 0 binding 0의 uniform 전역.
+fn uniform_global(module: &Module) -> Option<(Handle<GlobalVariable>, &GlobalVariable)> {
+    module.global_variables.iter().find(|(_, v)| {
+        v.space == AddressSpace::Uniform
+            && v.binding
+                .as_ref()
+                .is_some_and(|b| b.group == 0 && b.binding == 0)
+    })
+}
+
+/// 셰이더가 실제로 읽는 uniform 멤버 (docs/wallpaper-format.md#잠들기-animate).
+/// 멤버를 가릴 수 없게 uniform을 쓰면(블록 전체 load, 동적 인덱스) 전부 읽는 것으로 본다.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UniformReads {
+    all: bool,
+    members: Vec<String>,
+}
+
+impl UniformReads {
+    pub fn from_module(module: &Module) -> Self {
+        let Some((global, var)) = uniform_global(module) else {
+            return Self::default();
+        };
+        let TypeInner::Struct { members, .. } = &module.types[var.ty].inner else {
+            return Self {
+                all: true,
+                members: Vec::new(),
+            };
+        };
+        let mut read = vec![false; members.len()];
+        let mut all = false;
+        let functions = module
+            .functions
+            .iter()
+            .map(|(_, f)| f)
+            .chain(module.entry_points.iter().map(|e| &e.function));
+        for f in functions {
+            let is_uniform = |h: Handle<Expression>| matches!(f.expressions[h], Expression::GlobalVariable(g) if g == global);
+            // 멤버 포인터(`uniform.멤버`). GLSL 프런트엔드는 익명 블록의 멤버 포인터를 쓰든 안 쓰든 미리 만들어 두므로,
+            // 포인터가 있다는 것만으로는 읽은 것이 아니다. 그 포인터를 load하거나 더 들어갈 때(배열·성분) 읽은 것이다.
+            let member = |h: Handle<Expression>| match f.expressions[h] {
+                Expression::AccessIndex { base, index } if is_uniform(base) => Some(index),
+                _ => None,
+            };
+            for (_, e) in f.expressions.iter() {
+                let used = match *e {
+                    Expression::Load { pointer } => pointer,
+                    Expression::AccessIndex { base, .. } | Expression::Access { base, .. } => base,
+                    _ => continue,
+                };
+                if is_uniform(used) {
+                    // 블록 전체 load나 동적 인덱스: 멤버를 가릴 수 없다.
+                    if !matches!(e, Expression::AccessIndex { .. }) {
+                        all = true;
+                    }
+                } else if let Some(index) = member(used) {
+                    match read.get_mut(index as usize) {
+                        Some(r) => *r = true,
+                        None => all = true,
+                    }
+                }
+            }
+        }
+        let members = members
+            .iter()
+            .zip(read)
+            .filter(|(_, r)| *r)
+            .filter_map(|(m, _)| m.name.clone())
+            .collect();
+        Self { all, members }
+    }
+
+    fn reads_any(&self, slots: &[Slot]) -> bool {
+        self.all
+            || self
+                .members
+                .iter()
+                .any(|m| builtin_slot(m).is_some_and(|s| slots.contains(&s)))
+    }
+
+    /// `iTime`·`iTimeDelta`·`iFrame`·`iFrameRate`·`iDate` (WGSL 이름 포함) 중 하나라도 읽는지.
+    pub fn time(&self) -> bool {
+        self.reads_any(&TIME_SLOTS)
+    }
+
+    /// `iMouse`·`iPointer`·`iClick` 중 하나라도 읽는지.
+    pub fn pointer(&self) -> bool {
+        self.reads_any(&POINTER_SLOTS)
+    }
+
+    /// `iMouse`를 읽는지 (w는 누른 첫 프레임에만 양수라 한 프레임 더 그려야 함).
+    pub fn mouse(&self) -> bool {
+        self.reads_any(&[Slot::Mouse])
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scalar {
     Float,
@@ -346,12 +461,7 @@ impl UniformLayout {
     /// group 0 binding 0의 uniform 구조체. 셰이더가 uniform을 쓰지 않아 최적화로 사라졌어도 동작하도록,
     /// 없으면 빈 레이아웃(최소 크기)으로 둔다.
     pub fn from_module(module: &Module) -> Result<Self> {
-        let Some((_, var)) = module.global_variables.iter().find(|(_, v)| {
-            v.space == AddressSpace::Uniform
-                && v.binding
-                    .as_ref()
-                    .is_some_and(|b| b.group == 0 && b.binding == 0)
-        }) else {
+        let Some((_, var)) = uniform_global(module) else {
             return Ok(Self::default());
         };
         let TypeInner::Struct { members, span } = &module.types[var.ty].inner else {
@@ -760,5 +870,80 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{e:#}").contains("a.glsl"), "{e:#}");
+    }
+
+    fn reads(lang: Language, src: &str) -> UniformReads {
+        compile(&assets(), lang, src, &[], SHADERTOY_CHANNELS, "t")
+            .unwrap_or_else(|e| panic!("{e:#}"))
+            .reads
+    }
+
+    /// docs/wallpaper-format.md#잠들기-animate: 실제로 읽는 식이 있을 때만 시간을 읽는 것이다.
+    #[test]
+    fn reads_follow_used_uniforms() {
+        let glsl = |body: &str| {
+            reads(
+                Language::Glsl,
+                &format!("void mainImage(out vec4 c, in vec2 p) {{ {body} }}"),
+            )
+        };
+        // 포인터만: 시간을 안 읽음. 에필로그가 읽는 iResolution·waywall_origin은 시간이 아니다.
+        let r = glsl("c = vec4(distance(p, iPointer.xy) < 10.0 ? 1.0 : 0.0);");
+        assert!(!r.time() && r.pointer() && !r.mouse(), "{r:?}");
+        // 프리앰블에 선언만 있는 iTime은 읽은 것이 아니다.
+        let r = glsl("c = vec4(1.0);");
+        assert!(!r.time() && !r.pointer(), "{r:?}");
+        for body in [
+            "c = vec4(sin(iTime));",
+            "c = vec4(iTimeDelta);",
+            "c = vec4(float(iFrame));",
+            "c = vec4(iFrameRate);",
+            "c = iDate;",
+        ] {
+            assert!(glsl(body).time(), "{body}");
+        }
+        assert!(glsl("c = iMouse;").mouse());
+        // 시간을 함수 인자로 넘겨도 읽은 것이다.
+        let r = reads(
+            Language::Glsl,
+            "float f(float t) { return sin(t); }\nvoid mainImage(out vec4 c, in vec2 p) { c = vec4(f(iTime)); }",
+        );
+        assert!(r.time(), "{r:?}");
+        // 다른 함수 안에서 직접 읽어도.
+        let r = reads(
+            Language::Glsl,
+            "float f() { return iClick.z + iTime; }\nvoid mainImage(out vec4 c, in vec2 p) { c = vec4(f()); }",
+        );
+        assert!(r.time() && r.pointer(), "{r:?}");
+
+        let wgsl = |body: &str| {
+            reads(
+                Language::Wgsl,
+                &format!(
+                    "@fragment fn main_image(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {{ {body} }}"
+                ),
+            )
+        };
+        let r = wgsl("return vec4<f32>(g.pointer.xy, 0.0, 1.0);");
+        assert!(!r.time() && r.pointer(), "{r:?}");
+        let r = wgsl("return vec4<f32>(sin(g.time));");
+        assert!(r.time(), "{r:?}");
+        // uniform 블록을 통째로 읽으면 멤버를 가릴 수 없어 전부 읽는 것으로 본다.
+        let r = wgsl("let all = g; return vec4<f32>(all.resolution, 1.0);");
+        assert!(r.time() && r.pointer(), "{r:?}");
+    }
+
+    /// 예제: pointer-glow·gradient·ripple은 시간을 읽는다 (계속 그림).
+    #[test]
+    fn example_shaders_that_animate_read_time() {
+        let dir = examples();
+        for (file, lang) in [
+            ("pointer-glow.glsl", Language::Glsl),
+            ("gradient.wgsl", Language::Wgsl),
+            ("ripple/ripple.glsl", Language::Glsl),
+        ] {
+            let src = std::fs::read_to_string(dir.join(file)).unwrap();
+            assert!(reads(lang, &src).time(), "{file}");
+        }
     }
 }
