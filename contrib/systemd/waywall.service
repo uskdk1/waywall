@@ -1,4 +1,4 @@
-# waywall 데몬을 그래픽 세션과 함께 시작하는 systemd user 서비스 예제 (docs/setup.md#systemd-user-서비스).
+# waywall 데몬을 그래픽 세션과 함께 시작하는 systemd user 서비스 예제 (docs/setup.md#systemd-user-서비스-직접-설치).
 #
 # 설치 (직접 할 때만):
 #   mkdir -p ~/.config/systemd/user
@@ -6,7 +6,8 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now waywall.service
 #
-# ExecStart의 경로는 설치 방법에 맞게 바꾼다 (nix profile이면 ~/.nix-profile/bin/waywall).
+# home-manager를 쓰면 이 파일 대신 flake의 homeManagerModules.default(services.waywall.enable)를 쓴다.
+# ExecStart는 nix profile 기준(~/.nix-profile/bin/waywall). 다르게 설치했으면 경로를 바꾼다.
 
 [Unit]
 Description=waywall live wallpaper daemon

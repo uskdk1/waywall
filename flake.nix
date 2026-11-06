@@ -95,8 +95,11 @@
             # 데몬은 GTK를 쓰지 않으므로 GApps 래핑은 헬퍼에만 (docs/development.md#런타임-경로)
             dontWrapGApps = true;
             # PurismCore(MIT)를 데몬에 정적 링크하므로 라이선스 문구를 함께 배포한다.
+            # 예제 배경은 share/waywall/examples에 설치한다 (docs/setup.md#예제). Live2D 모델(model/)은 git 밖이라 들어가지 않는다.
             postInstall = ''
               install -Dm644 ${purism-core}/LICENSE $out/share/licenses/waywall/PurismCore.LICENSE
+              mkdir -p $out/share/waywall
+              cp -r examples $out/share/waywall/examples
             '';
             postFixup = ''
               wrapProgram $out/bin/waywall \
@@ -108,6 +111,7 @@
             '';
             meta = {
               description = "Live wallpaper daemon for Wayland compositors";
+              homepage = "https://github.com/uskdk1/waywall";
               mainProgram = "waywall";
               platforms = lib.platforms.linux;
             };
@@ -168,5 +172,9 @@
 
         formatter = pkgs.nixfmt;
       }
-    );
+    )
+    // {
+      # home-manager 모듈 (docs/setup.md#home-manager-모듈)
+      homeManagerModules.default = import ./nix/hm-module.nix self;
+    };
 }

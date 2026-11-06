@@ -3,11 +3,18 @@
 각 예제는 `waywall set <경로>`로 바로 띄울 수 있습니다(데몬이 실행 중이어야 함). 형식은
 [docs/wallpaper-format.md](../docs/wallpaper-format.md)에 있습니다.
 
+예제는 패키지의 `share/waywall/examples/`에 함께 설치됩니다([docs/setup.md](../docs/setup.md#예제)).
+아래 `$EX`는 그 경로입니다. 저장소를 clone했다면 `EX=examples`로 두면 됩니다.
+
 ```sh
-waywall set examples/scenes/fireflies            # 모든 출력
-waywall set -o DP-1 examples/web/pointer         # 한 출력만
-waywall set --save examples/scenes/character     # 설정 파일에도 기록
+EX=$(dirname "$(readlink -f "$(command -v waywall)")")/../share/waywall/examples
+
+waywall set "$EX/scenes/fireflies"               # 모든 출력
+waywall set -o DP-1 "$EX/web/pointer"            # 한 출력만
+waywall set --save "$EX/scenes/character"        # 설정 파일에도 기록
 ```
+
+설치된 예제는 Nix 스토어에 있어 읽기 전용입니다. 고쳐 쓰려면 `cp -r`로 복사한 뒤 `chmod -R u+w`로 쓰기 권한을 줍니다.
 
 ## 셰이더 (`shaders/`)
 
@@ -33,6 +40,7 @@ waywall set --save examples/scenes/character     # 설정 파일에도 기록
 **모델은 들어 있지 않습니다.** 배경 설정(`scene.toml`·`project.toml`)과 직접 그린 텍스처만 있고, Live2D 모델은 사용자가
 [Live2D 샘플 데이터](https://www.live2d.com/ko/download/sample-data/) 페이지에서 이용 조건에 동의하고 받아 넣습니다.
 받은 샘플의 `runtime` 폴더 **안의 내용**을 각 예제의 `model/`에 넣으면 됩니다(복사나 심볼릭 링크). `model/`은 git에 올라가지 않습니다.
+설치된 예제는 읽기 전용이므로 예제 디렉터리를 먼저 쓸 수 있는 곳에 복사합니다.
 
 | 예제 | 넣을 모델 (`model/`) | 보여 주는 것 | 속성 |
 |---|---|---|---|
@@ -40,8 +48,10 @@ waywall set --save examples/scenes/character     # 설정 파일에도 기록
 | `hiyori/` | "모모세 히요리" PRO판(영상용 아님)의 `runtime` (`hiyori_pro_t11.model3.json`) | 포즈(팔 두 세트 전환), HitArea 클릭(`Body` → `Tap@Body`, 나머지 → `Tap`), 창 빛줄기(`"below"` 입력), 햇살 속 먼지 | `rays`, `sun`, `dust` |
 
 ```sh
-cp -r ~/Downloads/miku/runtime/. examples/live2d/miku/model/     # 받은 위치에 맞게
-waywall set examples/live2d/miku
+cp -r "$EX/live2d/miku" ~/Wallpapers/ && chmod -R u+w ~/Wallpapers/miku   # clone했다면 생략하고 examples/live2d/miku를 그대로
+mkdir -p ~/Wallpapers/miku/model
+cp -r ~/Downloads/miku/runtime/. ~/Wallpapers/miku/model/              # 받은 위치에 맞게
+waywall set ~/Wallpapers/miku
 ```
 
 모델이 없으면 `set`이 `failed to read …/model/….model3.json`으로 거절합니다. 다른 모델을 쓰려면 `scene.toml`의 `model`·`scale`·`rect`와
@@ -61,7 +71,7 @@ waywall set examples/live2d/miku
 
 ```toml
 [output."DP-1"]
-wallpaper  = "~/waywall/examples/scenes/fireflies"
+wallpaper  = "~/Wallpapers/fireflies"   # cp -r "$EX/scenes/fireflies" ~/Wallpapers/ 로 복사해 둔 것
 properties = { density = 150.0 }
 
 [default]

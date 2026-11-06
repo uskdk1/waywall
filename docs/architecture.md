@@ -219,7 +219,7 @@ shader와 scene은 위의 surface·페이싱·시계·포인터 처리를 `GpuVi
   contain의 scissor는 캐시를 그릴 때도 같게 적용(레터박스 = 캐시의 clear 색).
 - 검증: 패럴랙스를 끈 반딧불 씬에서 캐시를 켜든 끄든 화면 캡처가 픽셀 단위로 같았음.
 
-**측정 (Intel Iris Xe / Mesa, 1920×1080 `rgba16float`, 반딧불 숲, GPU 타임스탬프로 잰 프레임당 GPU 시간).**
+**측정 (Intel 내장 GPU / Mesa, 1920×1080 `rgba16float`, 반딧불 숲, GPU 타임스탬프로 잰 프레임당 GPU 시간).**
 
 | 구성 | 프레임당 GPU 시간 |
 |---|---|

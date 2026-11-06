@@ -29,7 +29,7 @@ experimental-features = nix-command flakes
 
 ### 소스 받기
 ```sh
-git clone <repo> waywall && cd waywall
+git clone https://github.com/uskdk1/waywall && cd waywall
 ```
 
 > **주의:** flake는 git에 추적된 파일만 봅니다. 새 파일을 만들었으면 커밋 전이라도
@@ -41,7 +41,7 @@ git clone <repo> waywall && cd waywall
 nix develop                       # 개발 셸 (툴체인 + 라이브러리 + 도구)
 cargo build                       # 워크스페이스 전체
 cargo run -p waywall -- daemon    # 데몬 실행 (웹 헬퍼는 target/ 에서 자동으로 찾음)
-cargo run -p waywall -- set examples/plasma.glsl
+cargo run -p waywall -- set examples/shaders/pointer-glow.glsl
 
 nix build                         # 릴리스 패키지 → ./result/bin/{waywall,waywall-web}
 nix run . -- daemon
@@ -158,7 +158,8 @@ waywall/
 ├─ assets/                       # defaults.toml, 내장 셰이더, 스프라이트 (데이터)
 ├─ contrib/                      # 자동 시작 예제: systemd user 서비스, niri 설정 조각 (docs/setup.md)
 ├─ docs/
-└─ examples/                      # 예제 배경 (examples/README.md). 전부 테스트에서 열어 봄
+├─ nix/hm-module.nix             # home-manager 모듈 (docs/setup.md#home-manager-모듈)
+└─ examples/                      # 예제 배경 (examples/README.md). 전부 테스트에서 열어 봄, 패키지의 share/waywall/examples
 ```
 
 모듈 구성은 [architecture.md](architecture.md#데몬-모듈) 참고.

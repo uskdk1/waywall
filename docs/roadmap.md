@@ -38,7 +38,7 @@ GIF는 아직 첫 프레임만 표시(애니메이션은 M4의 영상 경로에�
 
 **완료 기준:** 예제 셰이더가 커서 호버/클릭에 반응, `fps = 30` 동작, HiDPI 출력에서 선명.
 
-**결과 (2026-11-01, niri, Intel Iris Xe / Mesa):** wgpu 30(Vulkan) + naga 30. GLSL·WGSL 예제가 화면에 표시되고,
+**결과 (2026-11-01, niri, Intel 내장 GPU / Mesa):** wgpu 30(Vulkan) + naga 30. GLSL·WGSL 예제가 화면에 표시되고,
 `set` 후 GPU 초기화 포함 108 ms에 응답. 60fps 정확(5초 299–300프레임, CPU 약 4%), `fps = 30` + `render_scale = 0.5`에서
 5초 150프레임·960×540 렌더. `pause` 시 프레임 0·모든 스레드 깨어남 0, `resume`으로 재개. 셰이더 → 이미지로 바꾸면 GPU 해제
 (스레드 1개로 복귀). 컴파일 오류는 `bad.glsl:3:10: Unknown variable: …`처럼 사용자 파일 줄 번호로 `set`이 거절(이전 배경 유지).
@@ -54,7 +54,7 @@ swapchain은 Bgra8Unorm(Shadertoy와 같은 색). 단위 테스트 30개.
 
 **완료 기준:** 4K60 영상이 끊김 없이 반복, `RUST_LOG`에 dmabuf 경로 확인, CPU 사용량이 디코딩 수준에 머무름.
 
-**결과 (2026-11-01, niri, Intel Iris Xe / iHD, GStreamer 1.28.7):** 4K60 HEVC·1080p60 H.264가 dmabuf 경로(`list`에 `dmabuf`, 로그 `mode=Dmabuf`)로
+**결과 (2026-11-01, niri, Intel 내장 GPU / iHD, GStreamer 1.28.7):** 4K60 HEVC·1080p60 H.264가 dmabuf 경로(`list`에 `dmabuf`, 로그 `mode=Dmabuf`)로
 60fps, 데몬 CPU 2–4%. 6초 영상이 이음새 없이 반복(segment seek). dmabuf `wl_buffer`는 디코더 풀 크기(11개)에서 더 늘지 않음.
 `hwdec = false`(소프트웨어 디코딩 + 복사)는 같은 1080p60에 CPU 69%. `pause` 시 CPU 0, 영상을 끄면 깨어남 0.
 움직이는 GIF는 shm 경로로 약 10fps·CPU 1%. 오디오 스트림이 PipeWire에 `waywall`로 나감.
@@ -89,7 +89,7 @@ libav GIF 디먹서는 비flush segment seek를 처리하지 못해 GIF만 flush
 잠듦(프레임 0, CPU 0). `tonemap = "none"`, 노출 1.0에서 이미지 레이어의 색이 원본과 같음. `contain`에서 레터박스에 레이어가 그려지지 않음.
 아직 없는 기능(파티클 등)을 쓴 씬은 이유와 함께 거절.
 
-**M6a 결과 (2026-11-02, niri, Intel Iris Xe / Mesa):** 예제 씬이 두 출력에 `set` 후 142 ms에 표시(GPU 초기화 포함,
+**M6a 결과 (2026-11-02, niri, Intel 내장 GPU / Mesa):** 예제 씬이 두 출력에 `set` 후 142 ms에 표시(GPU 초기화 포함,
 텍스처 4장). swapchain `Bgra8UnormSrgb`, HDR `Rgba16Float`. 화면 캡처의 픽셀이 텍스처 색과 정확히 같음
 (`#120e24`, `#2b2350`, `tonemap = "none"`). 4:3 설계 + `contain`에서 설계 영역 밖은 `clear` 색만 있고 레이어가 그려지지 않음.
 가상 포인터로 커서를 움직이면 깨어나 약 60fps로 그리고, 멈추면 정착 후 잠듦: 8초간 CPU tick 0, 자발적 문맥 전환 0회.
@@ -101,7 +101,7 @@ libav GIF 디먹서는 비flush segment seek를 처리하지 못해 GIF만 flush
 burst. 파티클 10만 개에서도 데몬 CPU가 파티클 수와 관계없이 미미. burst 전용 레이어만 있는 씬은 파티클이 다 사라지면 잠듦.
 (커서를 따라가는 점광원은 M6c.)
 
-**M6b 결과 (2026-11-02, niri, Intel Iris Xe / Mesa):** 예제 씬 `examples/scenes/fireflies/`(파티클 레이어 2개)가 eDP-1 60fps,
+**M6b 결과 (2026-11-02, niri, Intel 내장 GPU / Mesa):** 예제 씬 `examples/scenes/fireflies/`(파티클 레이어 2개)가 eDP-1 60fps,
 HDMI-A-1 약 119fps. 반딧불 3000개에서 데몬 CPU 17.8%, 같은 씬을 10만 개(`rate = 20000`)로 바꿔도 18.0%로 같은 fps(두 출력 합 약 180fps,
 CPU는 프레임 수에 비례하고 파티클 수와 무관). burst 전용 씬은 표시 후 8초간 CPU tick 0, 자발적 문맥 전환 0회.
 `circle`에 `radius`가 없는 씬은 `[[layer]] #1: \`emitter.radius\` is required for circle (> 0)`로 거절되고 이전 배경 유지.
@@ -113,7 +113,7 @@ CPU는 프레임 수에 비례하고 파티클 수와 무관). burst 전용 씬�
 반딧불 숲에 블룸이 보임. `[inputs]`가 있는 셰이더 배경이 `iChannel0`을 Shadertoy와 같은 방향·색으로 읽음.
 `tonemap = "none"`, 노출 1, 블룸 0, 비네트 0에서 M6a와 같은 픽셀(회귀 없음).
 
-**M6c 결과 (2026-11-02, niri, Intel Iris Xe / Mesa):** 햇빛 예제에서 빛줄기 셰이더(`"below"` 입력, `add`)가 해 주변 나무 사이로
+**M6c 결과 (2026-11-02, niri, Intel 내장 GPU / Mesa):** 햇빛 예제에서 빛줄기 셰이더(`"below"` 입력, `add`)가 해 주변 나무 사이로
 빛줄기를 냄(빛줄기 세기 0과 비교해 확인). 셰이더가 1080p 전체에 48번씩 샘플링해 무거워서 HDMI(120 Hz)가 약 64fps로 떨어짐(예제의 비용).
 조명 예제에서 노멀맵 벽돌의 빛을 향한 가장자리가 밝아짐(방향 확인). 반딧불 숲에 기본 블룸(intensity 0.5)으로 빛 번짐이 생김.
 `[inputs]`가 있는 셰이더 배경(`examples/shaders/ripple/`)이 그림 위쪽(빨강)을 화면 위에 그림(GLSL 상하 반전 확인).
@@ -134,7 +134,7 @@ shader 레이어 `render_scale`(레이어별 렌더 해상도)을 추가하고 �
 **M6d 완료 기준:** 예제 캐릭터 씬(`examples/scenes/character/`)에서 머리카락만 흔들리고(마스크 밖은 고정),
 눈동자가 흰자 밖으로 나가지 않으면서 커서를 따라봄.
 
-**M6d 결과 (2026-11-02, niri, Intel Iris Xe / Mesa):** 캐릭터 예제가 두 출력에서 약 60/117fps. 빛줄기·follow를 뺀 변형에서 두 프레임의 차이가
+**M6d 결과 (2026-11-02, niri, Intel 내장 GPU / Mesa):** 캐릭터 예제가 두 출력에서 약 60/117fps. 빛줄기·follow를 뺀 변형에서 두 프레임의 차이가
 머리카락 윤곽에만 생기고 얼굴 안쪽·배경은 그대로(sway가 마스크 안에서만 움직임). 눈동자를 옆으로 밀어 둔 변형에서 흰자 밖 부분이
 잘림(clip). 효과 파일 uniform을 이름으로 채우기·`follow` 계산(최대 이동, 거리 비례, 패럴랙스 기준점, `on_leave`)·필드 검사는 단위 테스트.
 빛줄기 예제의 일정한 샘플 간격 때문에 생긴 줄무늬(창문 모양이 사슬처럼 반복)를 픽셀마다 시작점 지터로 없앰. 단위 테스트 54개.
@@ -190,7 +190,7 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 - 셰이더 배경 `[inputs]`, 씬 shader 레이어 `inputs`, `shader` 효과 `inputs`(1번부터) 모두 같은 경로. 고정 배열은 `Vec`으로
 - 4는 `SHADERTOY_CHANNELS`(Shadertoy 호환 인터페이스 값) 한 곳에만 남음
 
-**결과 (2026-11-04, niri, Intel Iris Xe / Mesa):** 테스트 데몬(별도 소켓)에서 광원 1(하늘·해) + 가림 레이어 5(막대 4개 + 색유리 1개,
+**결과 (2026-11-04, niri, Intel 내장 GPU / Mesa):** 테스트 데몬(별도 소켓)에서 광원 1(하늘·해) + 가림 레이어 5(막대 4개 + 색유리 1개,
 `iChannel1`–`iChannel5`)를 받는 빛줄기 씬이 두 출력에서 `playing`. 해를 덮은 막대 네 개가 각각 어두운 그림자 줄을 부채꼴로 내고,
 5번 채널(4개를 넘는 채널)의 색유리를 지난 빛이 붉게 물듦(화면 캡처). 채널 알파를 그대로 출력한 디버그 셰이더로 1·4·5번 채널이 제자리에 묶인 것도 확인.
 기존 예제 ripple·sunlight·character·pointer-glow는 그대로 `playing`, wgpu 오류 없음. 이 테스트 셰이더는 1080p 전체에 48 샘플 × 6 채널이라
@@ -207,7 +207,7 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 
 ## M8c — 셰이더 잠들기 ✅
 시간을 읽는 셰이더만 계속 그린다. 전에는 셰이더 배경·shader 레이어·셰이더 효과가 있으면 항상 계속 그려서, 포인터에만 반응하는 셰이더(커서 아래만 다른 그림이
-보이는 렌즈 등)도 커서가 멈춰 있는 동안 1080p 두 출력을 매 프레임 다시 그려 화면 전체가 버벅였다(2026-11-05, Iris Xe. 같은 효과를
+보이는 렌즈 등)도 커서가 멈춰 있는 동안 1080p 두 출력을 매 프레임 다시 그려 화면 전체가 버벅였다(2026-11-05, Intel 내장 GPU. 같은 효과를
 `clip` + `follow`로 바꾸자 멈춰 있을 때 CPU 약 2%). 형식은 [wallpaper-format.md](wallpaper-format.md#잠들기-animate).
 
 - **자동 판정** (`gpu/shadertoy.rs` `UniformReads`): naga 모듈의 모든 함수에서 uniform 전역의 멤버 포인터가 실제로 쓰이는지(그 포인터를
@@ -222,7 +222,7 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 - 내장값 `animate = "auto"`: `assets/defaults.toml`의 `[types.shader]`·`[types.scene.shader]`·`[types.scene.effects.sway]`
 - 함께 고침: shader 레이어의 `follow`가 움직이는 중에도 씬이 잠들 수 있던 것(follow 결과를 `moving`에 넣지 않았음. 전에는 셰이더가 늘 깨워 둬서 드러나지 않음)
 
-**결과 (2026-11-05, niri, Intel Iris Xe / Mesa):** 테스트 데몬(별도 소켓)에서 `iTime`을 읽지 않는 렌즈 셰이더 씬(그림 두 장 + `"below"`·레이어 입력 +
+**결과 (2026-11-05, niri, Intel 내장 GPU / Mesa):** 테스트 데몬(별도 소켓)에서 `iTime`을 읽지 않는 렌즈 셰이더 씬(그림 두 장 + `"below"`·레이어 입력 +
 `iPointer`)이 커서가 없는 출력(HDMI-A-1)에서 약 0.2 fps(잠듦), `iTime`을 읽는 `pointer-glow.glsl`은 두 출력 60·118 fps(주사율)로 계속.
 `sunlight`(빛줄기, 포인터·아래 장면만 읽음)도 이제 커서가 없는 출력에서 잠듦. 커서가 있는 출력에서 렌즈를 움직이는 모습과
 `animate = { click = 0.7 }`의 화면 동작은 직접 확인하지 못함(단위 테스트로만). 단위 테스트 76개
@@ -259,7 +259,7 @@ niri가 `width 0 requested without setting left and right anchors` 프로토콜 
 - live2d 레이어에 `lit`(씬 `[[light]]` 음영)을 줄지. 노멀맵이 없어 방향감이 약하고, 빛 가리기는 `lit` 없이도 됨
   ([빛 가리기](wallpaper-format.md#빛-가리기-빛줄기와-캐릭터레이어))
 
-**M9a′ 결과 (2026-11-04, Intel Iris Xe / Mesa, PurismCore v1.1.0 `1069334`, ABI v6 · compat 6.0.1):** M9a와 같은 검증 프로그램에서
+**M9a′ 결과 (2026-11-04, Intel 내장 GPU / Mesa, PurismCore v1.1.0 `1069334`, ABI v6 · compat 6.0.1):** M9a와 같은 검증 프로그램에서
 PurismCore(정적 링크, 직접 쓴 최소 FFI)로 메시를 만들고 같은 렌더러로 그려 mocari 결과와 비교. 파라미터는 mocari가 계산한 값(모션·물리 적용 후)을 그대로 넣음.
 - 두 모델 모두 MOC3 v3.x(`csmMocVersion_30`)로 읽힘. drawable 수·ID 순서·그리기 순서·렌더 순서가 mocari와 같음
 - **좌표 규약:** 정점 위치는 같은 모델 공간. UV는 세로가 반대(Core `v` = mocari `1 − v`, Core는 왼쪽 아래 원점)
@@ -275,7 +275,7 @@ PurismCore(정적 링크, 직접 쓴 최소 FFI)로 메시를 만들고 같은 �
   ("모모세 히요리(영상용 버전)" `~/hiyori_movie_ko`는 Editor 원본만 있고 `.moc3`가 없어 쓸 수 없었음)
 - 빌드는 `make CFLAGS="-O2 -fPIC"`로 `libPurismCore.a`·`.so`가 나옴(C99, 의존은 libc·libm). waywall에서는 flake 입력 + `cc` 빌드로 넣을 예정
 
-**M9a 결과 — 취소된 mocari 검증, 비교 기준으로 보관 (2026-11-04, Intel Iris Xe / Mesa, mocari 0.4.0):** 화면 없이 1024² 텍스처에 렌더해 PNG로 확인하는 검증 프로그램(저장소 밖)으로 확인.
+**M9a 결과 — 취소된 mocari 검증, 비교 기준으로 보관 (2026-11-04, Intel 내장 GPU / Mesa, mocari 0.4.0):** 화면 없이 1024² 텍스처에 렌더해 PNG로 확인하는 검증 프로그램(저장소 밖)으로 확인.
 - 라이선스 MIT, `forbid(unsafe_code)`, 의존 wgpu 30(waywall과 같음). 렌더러는 feature `wgpu`라 코어만 쓸 수 있음
 - **렌더:** 두 모델 모두 기본 자세가 깨짐 없이 그려짐(FREE 88 drawable · 정점 1970, PRO 110 drawable · 정점 3507, 스키닝 포함 PRO도 정상). 로드 약 40 ms
 - **모션:** 대기 모션 1.5초 후 화면의 27%(FREE)·15%(PRO) 픽셀이 바뀜
@@ -291,7 +291,7 @@ PurismCore(정적 링크, 직접 쓴 최소 FFI)로 메시를 만들고 같은 �
   **GitHub 저장소(`Eatgrapes/Mocari`)가 404, 제작자 계정도 사라짐** → 취소. 남은 포크(`Initsnow/Mocari`)는 2026-10에 커밋 1개뿐이라 대안이 되지 못함
 - 위 항목 중 크로스페이드·눈 깜빡임·숨쉬기·시선·클릭 판정·색 처리·파라미터 이름은 백엔드와 관계없이 M9c에서 그대로 해당한다
 
-**M9c 결과 (2026-11-04, niri, Intel Iris Xe / Mesa, PurismCore v1.1.0):**
+**M9c 결과 (2026-11-04, niri, Intel 내장 GPU / Mesa, PurismCore v1.1.0):**
 - 빌드: flake 입력 `purism-core`(태그 커밋 `1069334` 고정) → `crates/waywall/build.rs`가 `cc`로 C 소스 17개를 컴파일해 정적 링크
   (`PURISM_CORE_SRC`, devShell·패키지 공통). 패키지에 PurismCore 라이선스(`share/licenses/waywall/PurismCore.LICENSE`)를 함께 넣음
 - 렌더: 모델을 rect 렌더 크기의 `Rgba16Float` 텍스처에 그린 뒤 image 파이프라인 사각형으로 합성(텍스처 경유 shader 레이어와 같은 길).
@@ -358,7 +358,7 @@ M11은 보류. 캐릭터 레이어는 같은 합성 경로(자기 텍스처에 �
 먼저 하는 쪽이 그 경로를 만든다.
 
 ## 이후
-- 씬 정지 레이어 캐시: 구현·측정했으나 Iris Xe에서 이득이 없어 보류. 설계·측정·되살릴 조건·주의점은 [architecture.md](architecture.md#보류한-최적화-정지-레이어-캐시)
+- 씬 정지 레이어 캐시: 구현·측정했으나 Intel 내장 GPU에서 이득이 없어 보류. 설계·측정·되살릴 조건·주의점은 [architecture.md](architecture.md#보류한-최적화-정지-레이어-캐시)
 - GUI 매니저(썸네일 라이브러리, 속성 편집) — IPC `subscribe` 스트림 기반
 - `ext_idle_notify_v1` 기반 유휴 정지
 - 배터리 모드(UPower D-Bus) — fps 제한/정지

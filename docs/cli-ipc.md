@@ -115,7 +115,7 @@ HDMI-A-1  1920x1080@1     -         -      idle     vol 50        solid
   "outputs": [
     {
       "name": "DP-1",
-      "description": "Dell Inc. DELL U2720Q",
+      "description": "Example Corp. 27\" Monitor",
       "width": 2560, "height": 1440, "scale": 1.0,
       "wallpaper": { "path": "~/Wallpapers/rain.mp4", "kind": "video", "name": "rain.mp4" },
       "render_path": "dmabuf",
