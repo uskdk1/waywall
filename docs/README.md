@@ -30,3 +30,9 @@ waywall은 Wayland 컴포지터용 라이브 배경화면 데몬입니다. Windo
 | [setup.md](setup.md) | 설치, 데몬 실행, 자동 시작(systemd · niri) |
 | [development.md](development.md) | Nix 개발 환경, 빌드·실행·테스트 방법 |
 | [roadmap.md](roadmap.md) | 단계별 마일스톤 |
+
+## 라이선스
+
+waywall은 [Apache License 2.0](../LICENSE)으로 배포합니다. 예제 배경(`examples/`)과 내장 셰이더(`assets/`)도 같습니다.
+데몬에 정적 링크하는 [PurismCore](https://github.com/SakuraMotion/PurismCore)는 MIT이며, 패키지는 두 라이선스 문구를
+`share/licenses/waywall/`에 함께 설치합니다. Live2D 모델은 포함하지 않으며, 사용자가 받은 모델은 그 모델의 이용 조건을 따릅니다.

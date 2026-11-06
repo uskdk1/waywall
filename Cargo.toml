@@ -6,6 +6,7 @@ members = ["crates/waywall", "crates/waywall-proto", "crates/waywall-web"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
+license = "Apache-2.0"
 repository = "https://github.com/uskdk1/waywall"
 
 [workspace.lints.rust]

@@ -155,6 +155,7 @@ waywall/
 │  ├─ waywall/                   # 데몬 + CLI
 │  ├─ waywall-web/               # 웹 헬퍼
 │  └─ waywall-proto/             # 공유 타입
+├─ LICENSE                       # Apache-2.0 (docs/README.md#라이선스)
 ├─ assets/                       # defaults.toml, 내장 셰이더, 스프라이트 (데이터)
 ├─ contrib/                      # 자동 시작 예제: systemd user 서비스, niri 설정 조각 (docs/setup.md)
 ├─ docs/

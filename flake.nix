@@ -75,6 +75,7 @@
           fileset = lib.fileset.unions [
             ./Cargo.toml
             ./Cargo.lock
+            ./LICENSE
             ./crates
             ./assets
             ./examples # 예제 셰이더 컴파일 테스트
@@ -97,6 +98,7 @@
             # PurismCore(MIT)를 데몬에 정적 링크하므로 라이선스 문구를 함께 배포한다.
             # 예제 배경은 share/waywall/examples에 설치한다 (docs/setup.md#예제). Live2D 모델(model/)은 git 밖이라 들어가지 않는다.
             postInstall = ''
+              install -Dm644 LICENSE $out/share/licenses/waywall/LICENSE
               install -Dm644 ${purism-core}/LICENSE $out/share/licenses/waywall/PurismCore.LICENSE
               mkdir -p $out/share/waywall
               cp -r examples $out/share/waywall/examples
@@ -112,6 +114,7 @@
             meta = {
               description = "Live wallpaper daemon for Wayland compositors";
               homepage = "https://github.com/uskdk1/waywall";
+              license = lib.licenses.asl20;
               mainProgram = "waywall";
               platforms = lib.platforms.linux;
             };
