@@ -38,7 +38,7 @@ waywall set --save "$EX/scenes/character"        # 설정 파일에도 기록
 ## Live2D (`live2d/`)
 
 **모델은 들어 있지 않습니다.** 배경 설정(`scene.toml`·`project.toml`)과 직접 그린 텍스처만 있고, Live2D 모델은 사용자가
-[Live2D 샘플 데이터](https://www.live2d.com/ko/download/sample-data/) 페이지에서 이용 조건에 동의하고 받아 넣습니다.
+[Live2D 샘플 데이터](https://www.live2d.com/ko/learn/sample/) 페이지에서 이용 조건에 동의하고 받아 넣습니다.
 받은 샘플의 `runtime` 폴더 **안의 내용**을 각 예제의 `model/`에 넣으면 됩니다(복사나 심볼릭 링크). `model/`은 git에 올라가지 않습니다.
 설치된 예제는 읽기 전용이므로 예제 디렉터리를 먼저 쓸 수 있는 곳에 복사합니다.
 
