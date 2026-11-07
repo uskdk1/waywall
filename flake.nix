@@ -88,6 +88,9 @@
           inherit src nativeBuildInputs buildInputs;
           cargoLock.lockFile = ./Cargo.lock;
           env.PURISM_CORE_SRC = "${purism-core}";
+          # 패닉 위치에 박히는 std 소스 경로(툴체인의 rust-src)를 지운다. 안 지우면 툴체인 전체(rustc·gcc)가
+          # 런타임 의존성으로 딸려 온다 (docs/development.md#패키지-크기).
+          env.RUSTFLAGS = "--remap-path-prefix=${toolchain}=/rust-toolchain";
         };
 
         waywall = rustPlatform.buildRustPackage (
@@ -103,6 +106,8 @@
               mkdir -p $out/share/waywall
               cp -r examples $out/share/waywall/examples
             '';
+            # 툴체인 참조가 다시 생기면 빌드를 실패시킨다.
+            disallowedReferences = [ toolchain ];
             postFixup = ''
               wrapProgram $out/bin/waywall \
                 --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs} \

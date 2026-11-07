@@ -95,6 +95,16 @@ outputs (x86_64-linux, aarch64-linux)
 `wayland-utils`(`wayland-info` — 컴포지터가 광고하는 프로토콜 확인), `libva-utils`(`vainfo`),
 `gst_all_1.gstreamer`의 `gst-inspect-1.0`, `gst-launch-1.0`, `renderdoc`(GPU 프레임 디버깅)
 
+### 패키지 크기
+실행 파일은 `waywall` 약 13 MB, `waywall-web` 약 0.8 MB입니다. 런타임 클로저(`nix path-info -Sh ./result`)는 약 1.1 GiB이며
+대부분 WebKitGTK·GStreamer 플러그인과 그 의존성입니다(시스템에 이미 있으면 공유).
+
+- rust-overlay 툴체인은 rust-src를 함께 담고 있어, 제네릭 std 코드의 패닉 위치에 툴체인의 스토어 경로가 박힙니다. 그대로 두면
+  rustc·gcc까지 런타임 의존성이 되어 클로저가 2.4 GiB가 됩니다. 그래서 `RUSTFLAGS`에
+  `--remap-path-prefix=<툴체인>=/rust-toolchain`을 넣고, 패키지에 `disallowedReferences = [ toolchain ]`를 두어
+  참조가 다시 생기면 빌드가 실패하게 합니다.
+- 어떤 경로가 왜 딸려 오는지는 `nix why-depends ./result /nix/store/<경로>`로 확인합니다.
+
 ## NixOS가 아닌 배포판에서 실행할 때 (GPU 드라이버)
 
 Nix로 빌드한 프로그램은 시스템의 Vulkan ICD/VA-API 드라이버(`/usr/lib/...`)를 찾지 못합니다.
