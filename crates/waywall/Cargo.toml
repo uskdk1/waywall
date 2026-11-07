@@ -38,7 +38,7 @@ wayland-client = "0.31.15"
 wayland-cursor = "0.31.14"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
-waywall-proto = { version = "0.1.0", path = "../waywall-proto" }
+waywall-proto = { version = "0.1.1", path = "../waywall-proto" }
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan", "glsl", "wgsl", "naga-ir", "std"] }
 
 [build-dependencies]
